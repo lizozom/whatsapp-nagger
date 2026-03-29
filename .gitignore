@@ -1,0 +1,9 @@
+nagger
+tasks.db
+tasks.db-wal
+tasks.db-shm
+whatsapp_session.db
+whatsapp_session.db-wal
+whatsapp_session.db-shm
+personas.md
+.env
