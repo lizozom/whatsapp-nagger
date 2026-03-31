@@ -81,7 +81,7 @@ func (s *TaskStore) ListTasks(assignee, status string) ([]Task, error) {
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY CASE WHEN due_date IS NULL OR due_date = '' THEN 1 ELSE 0 END, due_date ASC, created_at DESC"
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {

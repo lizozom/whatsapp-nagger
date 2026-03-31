@@ -10,7 +10,9 @@ A WhatsApp bot that lives in your family group chat, manages a shared task backl
 - **Extracts tasks** from natural conversation ("I'll fix the fence tomorrow")
 - **Tracks a backlog** in SQLite — who owes what, and for how long
 - **Nags** assignees with dry, sarcastic reminders when tasks rot
-- **Sends a daily digest** ("Wall of Shame") at a scheduled time
+- **Sends a daily digest** ("Wall of Shame") at a scheduled time — tasks grouped by assignee
+- **Tags people** in WhatsApp messages with @mentions to force notifications
+- **On-demand digest** — ask for the digest in chat anytime ("show me the digest")
 
 Powered by Claude (Anthropic) with tool calling for structured task management — no regex parsing, no brittle keyword matching.
 
@@ -103,6 +105,15 @@ Copy the example and customize it:
 cp personas.md.example personas.md
 ```
 
+Add a `**Phone:**` field (international format, no `+`) to enable @mentions in WhatsApp:
+
+```markdown
+## Alice
+- **Phone:** 972501234567
+- **Role:** Parent / Engineer
+- **Nag style:** Light touch
+```
+
 The bot loads personas from (in order of priority):
 1. **`personas.md`** file (or path in `PERSONAS_FILE` env var)
 2. **`FAMILY_MEMBERS`** env var (a single string description)
@@ -126,9 +137,15 @@ The bot loads personas from (in order of priority):
 
 ## Daily Digest
 
-Set `DIGEST_HOUR` (e.g. `08:30`) to receive a daily "Wall of Shame" summary in your group. The bot lists all pending tasks and roasts anyone with overdue items.
+Set `DIGEST_HOUR` (e.g. `08:30`) to receive a daily "Wall of Shame" summary in your group. The digest lists every pending task grouped by assignee, with @mentions to force notifications.
 
-The digest fires once per day (tracked in SQLite to prevent double-sends across restarts).
+You can also request the digest anytime in chat — just ask "show me the digest" or "what's the daily summary".
+
+The scheduled digest fires once per day (tracked in SQLite to prevent double-sends across restarts).
+
+## Versioning
+
+The version lives in `internal/version/version.go`. Bump it manually before deploying.
 
 ## Deploy to Fly.io
 
@@ -147,8 +164,8 @@ fly secrets set \
   WHATSAPP_PHONE=972501234567 \
   DIGEST_HOUR=08:30
 
-# Deploy
-fly deploy
+# Deploy (injects version + deploy date via ldflags)
+bash deploy.sh
 ```
 
 On first deploy, visit `https://your-app.fly.dev/pair` to get the pairing code and link WhatsApp.
@@ -167,9 +184,11 @@ internal/
   agent/                 Claude agent with tool calling
   db/                    SQLite task store + metadata
   messenger/
-    messenger.go         IMessenger interface
+    messenger.go         IMessenger interface + Mention type
     terminal.go          Terminal/stdin implementation
     whatsapp.go          WhatsApp (whatsmeow) implementation
+  version/               Version + deploy date (set via ldflags)
+deploy.sh                Deploy script (reads version, injects ldflags)
 Dockerfile               Multi-stage build
 fly.toml                 Fly.io configuration
 personas.md.example      Example personas file

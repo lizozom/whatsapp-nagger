@@ -263,3 +263,27 @@ func (wa *WhatsApp) Write(text string) error {
 	})
 	return err
 }
+
+func (wa *WhatsApp) WriteWithMentions(text string, mentions []Mention) error {
+	if !wa.paired {
+		return fmt.Errorf("not paired yet — scan QR code first")
+	}
+	if len(mentions) == 0 {
+		return wa.Write(text)
+	}
+
+	jids := make([]string, len(mentions))
+	for i, m := range mentions {
+		jids[i] = m.Phone + "@s.whatsapp.net"
+	}
+
+	_, err := wa.client.SendMessage(context.Background(), wa.groupJID, &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text),
+			ContextInfo: &waE2E.ContextInfo{
+				MentionedJID: jids,
+			},
+		},
+	})
+	return err
+}

@@ -46,3 +46,7 @@ func (t *Terminal) Write(text string) error {
 	fmt.Printf("[Nagger]: %s\n", text)
 	return nil
 }
+
+func (t *Terminal) WriteWithMentions(text string, mentions []Mention) error {
+	return t.Write(text)
+}

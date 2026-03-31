@@ -8,11 +8,15 @@ import (
 	"strings"
 	"time"
 
+	"regexp"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/lizozom/whatsapp-nagger/internal/db"
+	"github.com/lizozom/whatsapp-nagger/internal/messenger"
+	"github.com/lizozom/whatsapp-nagger/internal/version"
 )
 
-const systemPromptTemplate = `You are whatsapp-nagger, a family task management bot in a WhatsApp group.
+const systemPromptTemplate = `You are whatsapp-nagger v%s (deployed %s), a family task management bot in a WhatsApp group.
 Your job is to ensure the family backlog is cleared.
 
 Current date and time: %s
@@ -22,14 +26,29 @@ Timezone: %s
 Family members:
 %s
 
-Rules:
+Tool-use rules (follow objectively — no personality here):
 - If someone mentions a task, use add_task to log it. Convert relative dates ("tomorrow", "this week", "next Sunday") to absolute dates (YYYY-MM-DD) based on the current date.
 - If someone says a task is done, use update_task to mark it done.
 - If asked about tasks, use list_tasks to check.
+- If someone explicitly asks for a digest or daily summary, use list_tasks with status "pending", then format the result as a digest (see digest format below).
+
+Response style (apply only to your text replies, not tool calls):
 - Keep responses short and direct.
-- Tone: no-nonsense. Pragmatic, direct, slightly sarcastic.
+- Tone: no-nonsense Israeli software engineer. Pragmatic, direct, slightly sarcastic.
 - Never say "As an AI" or "I am happy to help". Just do the work.
-- If a task is rotting, nag the assignee with a dry remark.`
+- If a task is rotting, nag the assignee with a dry remark.
+
+Digest format (use when presenting all pending tasks as a digest):
+- Line 1: Today's date in DD/MM/YY format followed by a dash and a moderately sarcastic title. Example: "31/03/26 - Another day, another pile of excuses"
+- Then for EACH assignee, a section:
+  @AssigneeName
+  - exact task content (due: YYYY-MM-DD / overdue N days / no due date)
+  (repeat for every assignee who has tasks)
+- Last line: One short sarcastic closing remark.
+- EVERY task must appear. Do not skip, merge, or summarize.
+- Use @Name (e.g. @Liza, @Denis) so they get tagged.
+- Add a snarky parenthetical for overdue tasks.
+- Do NOT use markdown bold/headers — this is WhatsApp plain text.`
 
 func buildSystemPrompt() string {
 	tz := os.Getenv("TIMEZONE")
@@ -42,6 +61,8 @@ func buildSystemPrompt() string {
 	members := loadPersonas()
 
 	return fmt.Sprintf(systemPromptTemplate,
+		version.Version,
+		version.DeployDate,
 		now.Format("2006-01-02 15:04 MST"),
 		now.Weekday().String(),
 		tz,
@@ -63,6 +84,28 @@ func loadPersonas() string {
 		return members
 	}
 	return "Not specified — identify family members from conversation context."
+}
+
+// parsePersonaPhones extracts name->phone mappings from personas markdown.
+// Expects "## Name" headers followed by "- **Phone:** 972..." lines.
+func parsePersonaPhones(personas string) map[string]string {
+	phones := make(map[string]string)
+	nameRe := regexp.MustCompile(`(?m)^## (.+)`)
+	phoneRe := regexp.MustCompile(`(?i)\*\*Phone:\*\*\s*(\d+)`)
+
+	names := nameRe.FindAllStringSubmatchIndex(personas, -1)
+	for i, match := range names {
+		name := personas[match[2]:match[3]]
+		end := len(personas)
+		if i+1 < len(names) {
+			end = names[i+1][0]
+		}
+		section := personas[match[0]:end]
+		if pm := phoneRe.FindStringSubmatch(section); len(pm) > 1 {
+			phones[name] = pm[1]
+		}
+	}
+	return phones
 }
 
 type Agent struct {
@@ -117,7 +160,7 @@ func NewAgent(store *db.TaskStore) *Agent {
 				},
 			},
 		}},
-	}
+		}
 
 	return &Agent{
 		client: client,
@@ -169,48 +212,25 @@ func (a *Agent) HandleMessage(sender, text string) (string, error) {
 	}
 }
 
-func (a *Agent) GenerateDigest() (string, error) {
-	tasks, err := a.store.ListTasks("", "pending")
-	if err != nil {
-		return "", fmt.Errorf("list tasks: %w", err)
-	}
-
-	if len(tasks) == 0 {
-		return "Daily digest: zero pending tasks. Suspicious. Either you're all incredibly productive or nobody is logging anything. 🤔", nil
-	}
-
-	taskList, _ := json.Marshal(tasks)
-	prompt := fmt.Sprintf(`Here are all pending tasks:\n%s\n\nWrite a daily digest / "Wall of Shame" for the family WhatsApp group.
-
-Format rules:
-1. Start with a moderately sarcastic title/headline (one line).
-2. Group tasks by assignee. For each person use a bold header like **Name** followed by their tasks as bullet points:
-   **PersonA**
-   - task description (due: date / overdue X days / no due date)
-   - another task
-   **PersonB**
-   - task description
-3. End with one short sarcastic closing remark.
-
-Be extra snarky about overdue or ancient tasks. Keep each bullet concise.`, string(taskList))
-
-	message, err := a.client.Messages.New(context.Background(), anthropic.MessageNewParams{
-		Model:     "claude-haiku-4-5-20251001",
-		MaxTokens: 512,
-		System:    []anthropic.TextBlockParam{{Text: buildSystemPrompt()}},
-		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))},
-	})
-	if err != nil {
-		return "", fmt.Errorf("claude api: %w", err)
-	}
-
-	var parts []string
-	for _, block := range message.Content {
-		if tb, ok := block.AsAny().(anthropic.TextBlock); ok {
-			parts = append(parts, tb.Text)
+// resolveMentionsWithPhones scans text for @Name patterns, resolves them using
+// the provided name->phone map, and returns the modified text and mention list.
+func resolveMentionsWithPhones(text string, phones map[string]string) (string, []messenger.Mention) {
+	seen := make(map[string]bool)
+	var mentions []messenger.Mention
+	for name, phone := range phones {
+		if strings.Contains(text, "@"+name) && !seen[name] {
+			text = strings.ReplaceAll(text, "@"+name, "@"+phone)
+			mentions = append(mentions, messenger.Mention{Phone: phone, Name: name})
+			seen[name] = true
 		}
 	}
-	return strings.Join(parts, "\n"), nil
+	return text, mentions
+}
+
+// ResolveMentions scans text for @Name patterns, matches them against persona
+// phone numbers, and returns the modified text (with @phone) and mention list.
+func ResolveMentions(text string) (string, []messenger.Mention) {
+	return resolveMentionsWithPhones(text, parsePersonaPhones(loadPersonas()))
 }
 
 func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
