@@ -180,7 +180,19 @@ func (a *Agent) GenerateDigest() (string, error) {
 	}
 
 	taskList, _ := json.Marshal(tasks)
-	prompt := fmt.Sprintf(`Here are all pending tasks:\n%s\n\nWrite a daily digest / "Wall of Shame" for the family WhatsApp group. Address everyone. Be sarcastic about overdue or old tasks. Keep it short — a few lines max.`, string(taskList))
+	prompt := fmt.Sprintf(`Here are all pending tasks:\n%s\n\nWrite a daily digest / "Wall of Shame" for the family WhatsApp group.
+
+Format rules:
+1. Start with a moderately sarcastic title/headline (one line).
+2. Group tasks by assignee. For each person use a bold header like **Name** followed by their tasks as bullet points:
+   **PersonA**
+   - task description (due: date / overdue X days / no due date)
+   - another task
+   **PersonB**
+   - task description
+3. End with one short sarcastic closing remark.
+
+Be extra snarky about overdue or ancient tasks. Keep each bullet concise.`, string(taskList))
 
 	message, err := a.client.Messages.New(context.Background(), anthropic.MessageNewParams{
 		Model:     "claude-haiku-4-5-20251001",
