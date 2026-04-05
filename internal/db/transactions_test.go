@@ -151,14 +151,14 @@ func TestSumByCategory(t *testing.T) {
 	}
 }
 
-// TestSumByNetsRefunds is the ShoesOnLine bug regression test.
+// TestSumByNetsRefunds regression-tests a purchase + full refund scenario.
 // A charge of ₪1054 cancelled by a refund of ₪1054 must show spent_ils = 0,
 // not 1054. charges_ils and refunds_ils stay available for transparency.
 func TestSumByNetsRefunds(t *testing.T) {
 	store := newTestTxStore(t)
 	_, _, err := store.UpsertBatch([]Transaction{
-		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-03-01", AmountILS: -1054, Description: "SHOESONLINE"},
-		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-03-10", AmountILS: 1054, Description: "SHOESONLINE"},
+		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-03-01", AmountILS: -1054, Description: "RETAILER_X"},
+		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-03-10", AmountILS: 1054, Description: "RETAILER_X"},
 		// A separate groceries transaction so we can check ordering.
 		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-03-05", AmountILS: -200, Description: "SHUFERSAL"},
 	})
@@ -174,7 +174,7 @@ func TestSumByNetsRefunds(t *testing.T) {
 	var shoes, shufersal *SumRow
 	for i := range rows {
 		switch rows[i].Key {
-		case "SHOESONLINE":
+		case "RETAILER_X":
 			shoes = &rows[i]
 		case "SHUFERSAL":
 			shufersal = &rows[i]

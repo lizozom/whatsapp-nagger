@@ -8,7 +8,7 @@ type Message struct {
 // Mention represents a @mention to include in a message.
 type Mention struct {
 	Phone string // international format without +, e.g. "972501234567"
-	Name  string // display name used in the text, e.g. "Liza"
+	Name  string // display name used in the text, e.g. "Alice"
 }
 
 type IMessenger interface {

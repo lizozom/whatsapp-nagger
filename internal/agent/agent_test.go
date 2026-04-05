@@ -26,7 +26,7 @@ func newTestAgent(t *testing.T) *Agent {
 func TestExecuteToolAddTask(t *testing.T) {
 	a := newTestAgent(t)
 
-	result, err := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Denis","due_date":"2026-03-25"}`))
+	result, err := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Bob","due_date":"2026-03-25"}`))
 	if err != nil {
 		t.Fatalf("ExecuteTool add_task: %v", err)
 	}
@@ -38,8 +38,8 @@ func TestExecuteToolAddTask(t *testing.T) {
 	if task.Content != "Fix sink" {
 		t.Errorf("expected content 'Fix sink', got %q", task.Content)
 	}
-	if task.Assignee != "Denis" {
-		t.Errorf("expected assignee 'Denis', got %q", task.Assignee)
+	if task.Assignee != "Bob" {
+		t.Errorf("expected assignee 'Bob', got %q", task.Assignee)
 	}
 	if task.Status != "pending" {
 		t.Errorf("expected status 'pending', got %q", task.Status)
@@ -49,10 +49,10 @@ func TestExecuteToolAddTask(t *testing.T) {
 func TestExecuteToolListTasks(t *testing.T) {
 	a := newTestAgent(t)
 
-	a.ExecuteTool("add_task", []byte(`{"content":"Task 1","assignee":"Denis"}`))
-	a.ExecuteTool("add_task", []byte(`{"content":"Task 2","assignee":"Liza"}`))
+	a.ExecuteTool("add_task", []byte(`{"content":"Task 1","assignee":"Bob"}`))
+	a.ExecuteTool("add_task", []byte(`{"content":"Task 2","assignee":"Alice"}`))
 
-	result, err := a.ExecuteTool("list_tasks", []byte(`{"assignee":"Denis"}`))
+	result, err := a.ExecuteTool("list_tasks", []byte(`{"assignee":"Bob"}`))
 	if err != nil {
 		t.Fatalf("ExecuteTool list_tasks: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestExecuteToolListTasks(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 	if len(tasks) != 1 {
-		t.Errorf("expected 1 task for Denis, got %d", len(tasks))
+		t.Errorf("expected 1 task for Bob, got %d", len(tasks))
 	}
 }
 
@@ -80,25 +80,25 @@ func TestExecuteToolListTasksEmpty(t *testing.T) {
 }
 
 func TestParseCardOwners(t *testing.T) {
-	got := parseCardOwners("Liza:max/1518,max/4718,cal/4973;Denis:max/4327")
+	got := parseCardOwners("Alice:max/1234,max/5678,cal/9999;Bob:max/0000")
 	if len(got) != 2 {
 		t.Fatalf("expected 2 owners, got %d: %+v", len(got), got)
 	}
-	if len(got["Liza"]) != 3 {
-		t.Errorf("Liza: expected 3 cards, got %d", len(got["Liza"]))
+	if len(got["Alice"]) != 3 {
+		t.Errorf("Alice: expected 3 cards, got %d", len(got["Alice"]))
 	}
-	if got["Denis"][0].Provider != "max" || got["Denis"][0].CardLast4 != "4327" {
-		t.Errorf("Denis card wrong: %+v", got["Denis"])
+	if got["Bob"][0].Provider != "max" || got["Bob"][0].CardLast4 != "0000" {
+		t.Errorf("Bob card wrong: %+v", got["Bob"])
 	}
 }
 
 func TestParseCardOwnersMessyWhitespace(t *testing.T) {
-	got := parseCardOwners("  Liza : MAX / 1518 , cal/4973 ;  Denis: max/4327")
-	if len(got["Liza"]) != 2 {
-		t.Errorf("Liza: expected 2 cards with whitespace tolerance, got %d", len(got["Liza"]))
+	got := parseCardOwners("  Alice : MAX / 1234 , cal/9999 ;  Bob: max/0000")
+	if len(got["Alice"]) != 2 {
+		t.Errorf("Alice: expected 2 cards with whitespace tolerance, got %d", len(got["Alice"]))
 	}
-	if got["Liza"][0].Provider != "max" {
-		t.Errorf("provider should be lowercased, got %q", got["Liza"][0].Provider)
+	if got["Alice"][0].Provider != "max" {
+		t.Errorf("provider should be lowercased, got %q", got["Alice"][0].Provider)
 	}
 }
 
@@ -262,7 +262,7 @@ func TestDefaultBillingCycleRange(t *testing.T) {
 func TestExecuteToolUpdateTask(t *testing.T) {
 	a := newTestAgent(t)
 
-	addResult, _ := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Denis"}`))
+	addResult, _ := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Bob"}`))
 	var added db.Task
 	json.Unmarshal([]byte(addResult), &added)
 
@@ -282,7 +282,7 @@ func TestExecuteToolUpdateTask(t *testing.T) {
 func TestExecuteToolDeleteTask(t *testing.T) {
 	a := newTestAgent(t)
 
-	addResult, _ := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Denis"}`))
+	addResult, _ := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Bob"}`))
 	var added db.Task
 	json.Unmarshal([]byte(addResult), &added)
 
@@ -341,12 +341,12 @@ func TestVersionInSystemPrompt(t *testing.T) {
 func TestParsePersonaPhones(t *testing.T) {
 	personas := `# Family Personas
 
-## Liza
-- **Phone:** 972546260906
+## Alice
+- **Phone:** 972501234567
 - **Role:** Engineer
 
-## Denis
-- **Phone:** 972547084477
+## Bob
+- **Phone:** 972509876543
 - **Role:** Husband
 
 ## Millie
@@ -354,11 +354,11 @@ func TestParsePersonaPhones(t *testing.T) {
 `
 	phones := parsePersonaPhones(personas)
 
-	if phones["Liza"] != "972546260906" {
-		t.Errorf("Liza phone: got %q, want 972546260906", phones["Liza"])
+	if phones["Alice"] != "972501234567" {
+		t.Errorf("Alice phone: got %q, want 972501234567", phones["Alice"])
 	}
-	if phones["Denis"] != "972547084477" {
-		t.Errorf("Denis phone: got %q, want 972547084477", phones["Denis"])
+	if phones["Bob"] != "972509876543" {
+		t.Errorf("Bob phone: got %q, want 972509876543", phones["Bob"])
 	}
 	if _, ok := phones["Millie"]; ok {
 		t.Error("Millie should not have a phone entry")
@@ -386,21 +386,21 @@ func TestParsePersonaPhonesNoPhoneField(t *testing.T) {
 
 func TestResolveMentionsWithPhones(t *testing.T) {
 	phones := map[string]string{
-		"Liza":  "972546260906",
-		"Denis": "972547084477",
+		"Alice":  "972501234567",
+		"Bob": "972509876543",
 	}
 
-	text := "@Liza has 3 tasks. @Denis has 2 tasks."
+	text := "@Alice has 3 tasks. @Bob has 2 tasks."
 	resolved, mentions := resolveMentionsWithPhones(text, phones)
 
-	if !strings.Contains(resolved, "@972546260906") {
-		t.Errorf("expected Liza's phone in resolved text, got: %s", resolved)
+	if !strings.Contains(resolved, "@972501234567") {
+		t.Errorf("expected Alice's phone in resolved text, got: %s", resolved)
 	}
-	if !strings.Contains(resolved, "@972547084477") {
-		t.Errorf("expected Denis's phone in resolved text, got: %s", resolved)
+	if !strings.Contains(resolved, "@972509876543") {
+		t.Errorf("expected Bob's phone in resolved text, got: %s", resolved)
 	}
-	if strings.Contains(resolved, "@Liza") {
-		t.Error("@Liza should have been replaced")
+	if strings.Contains(resolved, "@Alice") {
+		t.Error("@Alice should have been replaced")
 	}
 	if len(mentions) != 2 {
 		t.Errorf("expected 2 mentions, got %d", len(mentions))
@@ -408,9 +408,9 @@ func TestResolveMentionsWithPhones(t *testing.T) {
 }
 
 func TestResolveMentionsNoDuplicates(t *testing.T) {
-	phones := map[string]string{"Liza": "972546260906"}
+	phones := map[string]string{"Alice": "972501234567"}
 
-	text := "@Liza did this. @Liza did that."
+	text := "@Alice did this. @Alice did that."
 	_, mentions := resolveMentionsWithPhones(text, phones)
 
 	if len(mentions) != 1 {
@@ -419,7 +419,7 @@ func TestResolveMentionsNoDuplicates(t *testing.T) {
 }
 
 func TestResolveMentionsNoMatch(t *testing.T) {
-	phones := map[string]string{"Liza": "972546260906"}
+	phones := map[string]string{"Alice": "972501234567"}
 
 	text := "No mentions here."
 	resolved, mentions := resolveMentionsWithPhones(text, phones)
@@ -433,7 +433,7 @@ func TestResolveMentionsNoMatch(t *testing.T) {
 }
 
 func TestResolveMentionsEmptyPhones(t *testing.T) {
-	text := "@Liza should not be resolved"
+	text := "@Alice should not be resolved"
 	resolved, mentions := resolveMentionsWithPhones(text, map[string]string{})
 
 	if resolved != text {

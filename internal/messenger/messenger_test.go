@@ -11,13 +11,13 @@ func newTestTerminal(input string) *Terminal {
 }
 
 func TestParseValidMessage(t *testing.T) {
-	term := newTestTerminal("[Denis]: Fix the sink\n")
+	term := newTestTerminal("[Bob]: Fix the sink\n")
 	msg, err := term.Read()
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if msg.Sender != "Denis" {
-		t.Errorf("expected sender 'Denis', got %q", msg.Sender)
+	if msg.Sender != "Bob" {
+		t.Errorf("expected sender 'Bob', got %q", msg.Sender)
 	}
 	if msg.Text != "Fix the sink" {
 		t.Errorf("expected text 'Fix the sink', got %q", msg.Text)
@@ -25,13 +25,13 @@ func TestParseValidMessage(t *testing.T) {
 }
 
 func TestParseMessageWithColonInText(t *testing.T) {
-	term := newTestTerminal("[Liza]: Note: buy milk\n")
+	term := newTestTerminal("[Alice]: Note: buy milk\n")
 	msg, err := term.Read()
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if msg.Sender != "Liza" {
-		t.Errorf("expected sender 'Liza', got %q", msg.Sender)
+	if msg.Sender != "Alice" {
+		t.Errorf("expected sender 'Alice', got %q", msg.Sender)
 	}
 	if msg.Text != "Note: buy milk" {
 		t.Errorf("expected text 'Note: buy milk', got %q", msg.Text)
@@ -75,13 +75,13 @@ func TestReadEOF(t *testing.T) {
 }
 
 func TestReadMultipleMessages(t *testing.T) {
-	term := newTestTerminal("[Denis]: First\n[Liza]: Second\n")
+	term := newTestTerminal("[Bob]: First\n[Alice]: Second\n")
 
 	msg1, err := term.Read()
 	if err != nil {
 		t.Fatalf("Read 1: %v", err)
 	}
-	if msg1.Sender != "Denis" || msg1.Text != "First" {
+	if msg1.Sender != "Bob" || msg1.Text != "First" {
 		t.Errorf("msg1: got sender=%q text=%q", msg1.Sender, msg1.Text)
 	}
 
@@ -89,7 +89,7 @@ func TestReadMultipleMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read 2: %v", err)
 	}
-	if msg2.Sender != "Liza" || msg2.Text != "Second" {
+	if msg2.Sender != "Alice" || msg2.Text != "Second" {
 		t.Errorf("msg2: got sender=%q text=%q", msg2.Sender, msg2.Text)
 	}
 }

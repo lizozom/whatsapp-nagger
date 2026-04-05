@@ -20,7 +20,7 @@ func newTestStore(t *testing.T) *TaskStore {
 func TestAddTask(t *testing.T) {
 	store := newTestStore(t)
 
-	task, err := store.AddTask("Fix the sink", "Denis", "2026-03-25")
+	task, err := store.AddTask("Fix the sink", "Bob", "2026-03-25")
 	if err != nil {
 		t.Fatalf("AddTask: %v", err)
 	}
@@ -31,8 +31,8 @@ func TestAddTask(t *testing.T) {
 	if task.Content != "Fix the sink" {
 		t.Errorf("expected content 'Fix the sink', got %q", task.Content)
 	}
-	if task.Assignee != "Denis" {
-		t.Errorf("expected assignee 'Denis', got %q", task.Assignee)
+	if task.Assignee != "Bob" {
+		t.Errorf("expected assignee 'Bob', got %q", task.Assignee)
 	}
 	if task.Status != "pending" {
 		t.Errorf("expected status 'pending', got %q", task.Status)
@@ -45,7 +45,7 @@ func TestAddTask(t *testing.T) {
 func TestAddTaskNoDueDate(t *testing.T) {
 	store := newTestStore(t)
 
-	task, err := store.AddTask("Buy milk", "Liza", "")
+	task, err := store.AddTask("Buy milk", "Alice", "")
 	if err != nil {
 		t.Fatalf("AddTask: %v", err)
 	}
@@ -57,9 +57,9 @@ func TestAddTaskNoDueDate(t *testing.T) {
 func TestListTasksAll(t *testing.T) {
 	store := newTestStore(t)
 
-	store.AddTask("Task 1", "Denis", "")
-	store.AddTask("Task 2", "Liza", "")
-	store.AddTask("Task 3", "Denis", "")
+	store.AddTask("Task 1", "Bob", "")
+	store.AddTask("Task 2", "Alice", "")
+	store.AddTask("Task 3", "Bob", "")
 
 	tasks, err := store.ListTasks("", "")
 	if err != nil {
@@ -73,25 +73,25 @@ func TestListTasksAll(t *testing.T) {
 func TestListTasksByAssignee(t *testing.T) {
 	store := newTestStore(t)
 
-	store.AddTask("Task 1", "Denis", "")
-	store.AddTask("Task 2", "Liza", "")
-	store.AddTask("Task 3", "Denis", "")
+	store.AddTask("Task 1", "Bob", "")
+	store.AddTask("Task 2", "Alice", "")
+	store.AddTask("Task 3", "Bob", "")
 
-	tasks, err := store.ListTasks("Denis", "")
+	tasks, err := store.ListTasks("Bob", "")
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
 	if len(tasks) != 2 {
-		t.Errorf("expected 2 tasks for Denis, got %d", len(tasks))
+		t.Errorf("expected 2 tasks for Bob, got %d", len(tasks))
 	}
 }
 
 func TestListTasksCaseInsensitive(t *testing.T) {
 	store := newTestStore(t)
 
-	store.AddTask("Task 1", "Denis", "")
+	store.AddTask("Task 1", "Bob", "")
 
-	tasks, err := store.ListTasks("denis", "")
+	tasks, err := store.ListTasks("bob", "")
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -103,8 +103,8 @@ func TestListTasksCaseInsensitive(t *testing.T) {
 func TestListTasksByStatus(t *testing.T) {
 	store := newTestStore(t)
 
-	task, _ := store.AddTask("Task 1", "Denis", "")
-	store.AddTask("Task 2", "Denis", "")
+	task, _ := store.AddTask("Task 1", "Bob", "")
+	store.AddTask("Task 2", "Bob", "")
 	store.UpdateTask(task.ID, "done", "")
 
 	pending, err := store.ListTasks("", "pending")
@@ -127,7 +127,7 @@ func TestListTasksByStatus(t *testing.T) {
 func TestUpdateTask(t *testing.T) {
 	store := newTestStore(t)
 
-	task, _ := store.AddTask("Fix the sink", "Denis", "")
+	task, _ := store.AddTask("Fix the sink", "Bob", "")
 	updated, err := store.UpdateTask(task.ID, "done", "")
 	if err != nil {
 		t.Fatalf("UpdateTask: %v", err)
@@ -143,7 +143,7 @@ func TestUpdateTask(t *testing.T) {
 func TestDeleteTask(t *testing.T) {
 	store := newTestStore(t)
 
-	task, _ := store.AddTask("Fix the sink", "Denis", "")
+	task, _ := store.AddTask("Fix the sink", "Bob", "")
 	err := store.DeleteTask(task.ID)
 	if err != nil {
 		t.Fatalf("DeleteTask: %v", err)

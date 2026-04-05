@@ -57,7 +57,7 @@ Digest format (use when presenting all pending tasks as a digest):
   (repeat for every assignee who has tasks)
 - Last line: One short sarcastic closing remark.
 - EVERY task must appear. Do not skip, merge, or summarize.
-- Use @Name (e.g. @Liza, @Denis) so they get tagged.
+- Use @Name (e.g. @Alice, @Bob) so they get tagged.
 - Add a snarky parenthetical for overdue tasks.
 - Do NOT use markdown bold/headers — this is WhatsApp plain text.`
 
@@ -100,7 +100,7 @@ func loadPersonas() string {
 // parseCardOwners parses CARD_OWNERS into a name -> []CardRef map.
 //
 // Format: "Owner1:provider/last4,provider/last4;Owner2:provider/last4"
-// Example: "Liza:max/1518,max/4718,cal/4973;Denis:max/4327"
+// Example: "Alice:max/1234,max/5678,cal/9999;Bob:max/0000"
 //
 // Whitespace around separators is tolerated. Provider is lower-cased.
 // Entries without a valid "provider/last4" pair are silently skipped.
@@ -191,7 +191,7 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"content":  map[string]any{"type": "string", "description": "What needs to be done"},
-					"assignee": map[string]any{"type": "string", "description": "Who should do it (Liza, Denis)"},
+					"assignee": map[string]any{"type": "string", "description": "Who should do it (Alice, Bob)"},
 					"due_date": map[string]any{"type": "string", "description": "Optional due date (YYYY-MM-DD)"},
 				},
 			},
@@ -232,7 +232,7 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 				"Aggregate credit card / bank expenses grouped by a dimension. " +
 					"Use for questions like 'how much did we spend this month', " +
 					"'top categories in February', 'top merchants this year', " +
-					"'how much did Liza spend vs Denis'. " +
+					"'how much did Alice spend vs Bob'. " +
 					"Amounts are in ILS. spent_ils is the NET outflow (charges minus refunds) — " +
 					"report THIS when the user asks 'how much did we spend'. " +
 					"charges_ils is gross debits and refunds_ils is gross credits, for transparency only. " +
@@ -254,7 +254,7 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 					"card_last4":        map[string]any{"type": "string", "description": "Filter to a single card by last 4 digits. Optional."},
 					"owner": map[string]any{
 						"type":        "string",
-						"description": "Filter to a single family member's cards (name as in personas.md, e.g. 'Liza' or 'Denis'). Optional.",
+						"description": "Filter to a single family member's cards (name as in personas.md, e.g. 'Alice' or 'Bob'). Optional.",
 					},
 					"limit": map[string]any{"type": "integer", "description": "Max groups to return (default 20, use 0 for unlimited)."},
 				},
@@ -277,7 +277,7 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 					"category":          map[string]any{"type": "string", "description": "Exact category filter. Optional."},
 					"merchant_contains": map[string]any{"type": "string", "description": "Substring match on description. Optional."},
 					"card_last4":        map[string]any{"type": "string", "description": "Card last4. Optional."},
-					"owner":             map[string]any{"type": "string", "description": "Family member name — filters to their cards (e.g. 'Liza', 'Denis'). Optional."},
+					"owner":             map[string]any{"type": "string", "description": "Family member name — filters to their cards (e.g. 'Alice', 'Bob'). Optional."},
 					"debits_only":       map[string]any{"type": "boolean", "description": "If true, only debits. Optional."},
 					"limit":             map[string]any{"type": "integer", "description": "Max rows to return (default 50)."},
 				},
