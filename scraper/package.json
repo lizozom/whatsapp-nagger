@@ -1,0 +1,23 @@
+{
+  "name": "whatsapp-nagger-scraper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local runner that scrapes Israeli credit card / bank transactions and posts them to the whatsapp-nagger ingest endpoint.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "cal": "tsx src/index.ts --provider=cal"
+  },
+  "dependencies": {
+    "israeli-bank-scrapers": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "overrides": {
+    "yargs": "^18.0.0"
+  }
+}

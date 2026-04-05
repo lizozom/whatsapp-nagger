@@ -134,6 +134,40 @@ The bot loads personas from (in order of priority):
 | `TIMEZONE` | Timezone for dates and daily digest | `Asia/Jerusalem` |
 | `DIGEST_HOUR` | Daily digest time, 24h format (e.g. `08:30`) | disabled if unset |
 | `QR_TOKEN` | Secret token to protect the `/pair` web endpoint | disabled if unset |
+| `INGEST_SECRET` | Shared secret for the `/ingest/transactions` endpoint. Enables the ingest HTTP server when set. | disabled if unset |
+| `INGEST_PORT` | Port for the ingest HTTP server | `8080` |
+
+## Transaction Ingest
+
+External scrapers (e.g. a Node sidecar running [`israeli-bank-scrapers`](https://github.com/eshaham/israeli-bank-scrapers) on a home runner) can push credit card / bank transactions into the bot's SQLite DB via an authenticated HTTP endpoint.
+
+Enable it by setting `INGEST_SECRET` to a long random string. The bot will start an HTTP server on `INGEST_PORT` exposing:
+
+- `POST /ingest/transactions` — accepts a JSON body of transactions, authenticated via HMAC-SHA256 in the `X-Signature` header.
+- `GET  /healthz` — liveness probe.
+
+Request body shape:
+
+```json
+{
+  "provider": "cal",
+  "run_id": "optional-client-side-id",
+  "fetched_at": "2026-04-05T08:00:00Z",
+  "transactions": [
+    {
+      "card_last4": "1234",
+      "posted_at": "2026-04-01",
+      "amount_ils": -42.50,
+      "description": "SHUFERSAL",
+      "memo": "",
+      "category": "groceries",
+      "status": "posted"
+    }
+  ]
+}
+```
+
+The `X-Signature` header must be the hex-encoded HMAC-SHA256 of the raw request body, keyed with `INGEST_SECRET`. Transaction IDs are computed as a stable hash of `(provider, card_last4, posted_at, amount_ils, description, memo)` server-side, so reruns of the same payload are idempotent.
 
 ## Daily Digest
 

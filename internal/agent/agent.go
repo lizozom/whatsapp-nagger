@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +33,15 @@ Tool-use rules (follow objectively — no personality here):
 - If someone says a task is done, use update_task to mark it done.
 - If asked about tasks, use list_tasks to check.
 - If someone explicitly asks for a digest or daily summary, use list_tasks with status "pending", then format the result as a digest (see digest format below).
+- If asked about expenses, spending, money, or a specific merchant/category, use expenses_summary (aggregations) or list_transactions (specific charges).
+  - Omitting since/until uses the CURRENT BILLING CYCLE, which runs from the BILLING_DAY of one month (default 10) through the day before BILLING_DAY of the next, inclusive. "This month's spending" and "current cycle" are the same thing — do NOT default to calendar months.
+  - For explicit ranges, convert to absolute dates using the current date above: "last cycle" = previous billing cycle window; "February" = 2026-02-01 to 2026-02-28; etc.
+  - Default group_by is "category" unless the user asks about merchants, months, or who spent what.
+  - Owners are defined in CARD_OWNERS env var. Use group_by="owner" to compare family members, or filter "owner" to scope to one person (e.g. "how much did I spend" → owner filter for the requesting user, resolved from the [Sender] prefix).
+  - Amounts are ILS. Always report spent_ils as the answer to "how much did we spend" — it is NET of refunds, so a ₪1,000 purchase fully refunded shows as ₪0 spent (not ₪1,000). Only mention charges_ils / refunds_ils if the user asks for a breakdown or the refund context is interesting (e.g. "you returned half of what you bought at TerminalX").
+  - spent_ils can be negative if a category had more refunds than charges in the period — report it as a net credit rather than "negative spending".
+  - Max provider categories are unreliable — Wolt in particular is mostly groceries, not restaurants. Note this in your answer if the user asks about food/eating-out categories.
+  - When presenting results, round to whole shekels, translate Hebrew category names if helpful, and include the date range you used.
 
 Response style (apply only to your text replies, not tool calls):
 - Keep responses short and direct.
@@ -86,6 +97,56 @@ func loadPersonas() string {
 	return "Not specified — identify family members from conversation context."
 }
 
+// parseCardOwners parses CARD_OWNERS into a name -> []CardRef map.
+//
+// Format: "Owner1:provider/last4,provider/last4;Owner2:provider/last4"
+// Example: "Liza:max/1518,max/4718,cal/4973;Denis:max/4327"
+//
+// Whitespace around separators is tolerated. Provider is lower-cased.
+// Entries without a valid "provider/last4" pair are silently skipped.
+func parseCardOwners(raw string) map[string][]db.CardRef {
+	out := make(map[string][]db.CardRef)
+	if raw == "" {
+		return out
+	}
+	for _, ownerBlock := range strings.Split(raw, ";") {
+		ownerBlock = strings.TrimSpace(ownerBlock)
+		if ownerBlock == "" {
+			continue
+		}
+		colon := strings.Index(ownerBlock, ":")
+		if colon < 0 {
+			continue
+		}
+		name := strings.TrimSpace(ownerBlock[:colon])
+		if name == "" {
+			continue
+		}
+		for _, entry := range strings.Split(ownerBlock[colon+1:], ",") {
+			entry = strings.TrimSpace(entry)
+			slash := strings.Index(entry, "/")
+			if slash < 0 {
+				continue
+			}
+			provider := strings.ToLower(strings.TrimSpace(entry[:slash]))
+			last4 := strings.TrimSpace(entry[slash+1:])
+			if provider == "" || last4 == "" {
+				continue
+			}
+			if len(last4) > 4 {
+				last4 = last4[len(last4)-4:]
+			}
+			out[name] = append(out[name], db.CardRef{Provider: provider, CardLast4: last4})
+		}
+	}
+	return out
+}
+
+// loadCardOwners reads and parses the CARD_OWNERS environment variable.
+func loadCardOwners() map[string][]db.CardRef {
+	return parseCardOwners(os.Getenv("CARD_OWNERS"))
+}
+
 // parsePersonaPhones extracts name->phone mappings from personas markdown.
 // Expects "## Name" headers followed by "- **Phone:** 972..." lines.
 func parsePersonaPhones(personas string) map[string]string {
@@ -111,11 +172,16 @@ func parsePersonaPhones(personas string) map[string]string {
 type Agent struct {
 	client  anthropic.Client
 	store   *db.TaskStore
+	txStore *db.TxStore // optional: enables expense tools when non-nil
 	history []anthropic.MessageParam
 	tools   []anthropic.ToolUnionParam
 }
 
-func NewAgent(store *db.TaskStore) *Agent {
+// NewAgent constructs an agent with task and (optional) transaction stores.
+// If txStore is nil, the expense tools are still registered but return an
+// "expenses not configured" error — this lets the system prompt stay constant
+// regardless of deployment configuration.
+func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 	client := anthropic.NewClient()
 
 	tools := []anthropic.ToolUnionParam{
@@ -160,18 +226,82 @@ func NewAgent(store *db.TaskStore) *Agent {
 				},
 			},
 		}},
-		}
+		{OfTool: &anthropic.ToolParam{
+			Name: "expenses_summary",
+			Description: anthropic.String(
+				"Aggregate credit card / bank expenses grouped by a dimension. " +
+					"Use for questions like 'how much did we spend this month', " +
+					"'top categories in February', 'top merchants this year', " +
+					"'how much did Liza spend vs Denis'. " +
+					"Amounts are in ILS. spent_ils is the NET outflow (charges minus refunds) — " +
+					"report THIS when the user asks 'how much did we spend'. " +
+					"charges_ils is gross debits and refunds_ils is gross credits, for transparency only. " +
+					"Default date range is the CURRENT BILLING CYCLE if since/until are omitted " +
+					"(cycles run from BILLING_DAY of one month through the day before BILLING_DAY of the next).",
+			),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"group_by": map[string]any{
+						"type":        "string",
+						"enum":        []string{"category", "merchant", "month", "provider", "card_last4", "owner"},
+						"description": "Dimension to group by. 'owner' aggregates across each family member's cards (defined in personas.md).",
+					},
+					"since":             map[string]any{"type": "string", "description": "Start date (YYYY-MM-DD), inclusive. Optional."},
+					"until":             map[string]any{"type": "string", "description": "End date (YYYY-MM-DD), inclusive. Optional."},
+					"provider":          map[string]any{"type": "string", "description": "Filter by provider: 'cal' or 'max'. Optional."},
+					"category":          map[string]any{"type": "string", "description": "Exact category filter (e.g. 'מזון וצריכה'). Optional."},
+					"merchant_contains": map[string]any{"type": "string", "description": "Case-insensitive substring match on merchant description. Optional."},
+					"card_last4":        map[string]any{"type": "string", "description": "Filter to a single card by last 4 digits. Optional."},
+					"owner": map[string]any{
+						"type":        "string",
+						"description": "Filter to a single family member's cards (name as in personas.md, e.g. 'Liza' or 'Denis'). Optional.",
+					},
+					"limit": map[string]any{"type": "integer", "description": "Max groups to return (default 20, use 0 for unlimited)."},
+				},
+				Required: []string{"group_by"},
+			},
+		}},
+		{OfTool: &anthropic.ToolParam{
+			Name: "list_transactions",
+			Description: anthropic.String(
+				"List individual credit card / bank transactions matching a filter. " +
+					"Use for drilling into specific charges (e.g. 'what did we buy at Shufersal in Feb'). " +
+					"Amounts are in ILS, negative for debits. " +
+					"Always set a limit — this can return hundreds of rows otherwise.",
+			),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"since":             map[string]any{"type": "string", "description": "Start date (YYYY-MM-DD). Optional."},
+					"until":             map[string]any{"type": "string", "description": "End date (YYYY-MM-DD). Optional."},
+					"provider":          map[string]any{"type": "string", "description": "'cal' or 'max'. Optional."},
+					"category":          map[string]any{"type": "string", "description": "Exact category filter. Optional."},
+					"merchant_contains": map[string]any{"type": "string", "description": "Substring match on description. Optional."},
+					"card_last4":        map[string]any{"type": "string", "description": "Card last4. Optional."},
+					"owner":             map[string]any{"type": "string", "description": "Family member name — filters to their cards (e.g. 'Liza', 'Denis'). Optional."},
+					"debits_only":       map[string]any{"type": "boolean", "description": "If true, only debits. Optional."},
+					"limit":             map[string]any{"type": "integer", "description": "Max rows to return (default 50)."},
+				},
+			},
+		}},
+	}
 
 	return &Agent{
-		client: client,
-		store:  store,
-		tools:  tools,
+		client:  client,
+		store:   store,
+		txStore: txStore,
+		tools:   tools,
 	}
 }
+
+// maxHistoryMessages bounds the conversation window sent to Claude. Older
+// messages are dropped (respecting tool_use/tool_result pairing — see
+// trimHistory). This keeps token usage bounded on a long-running bot.
+const maxHistoryMessages = 20
 
 func (a *Agent) HandleMessage(sender, text string) (string, error) {
 	userContent := fmt.Sprintf("[%s]: %s", sender, text)
 	a.history = append(a.history, anthropic.NewUserMessage(anthropic.NewTextBlock(userContent)))
+	a.history = trimHistory(a.history, maxHistoryMessages)
 
 	for {
 		message, err := a.client.Messages.New(context.Background(), anthropic.MessageNewParams{
@@ -294,7 +424,238 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		}
 		return `{"deleted": true}`, nil
 
+	case "expenses_summary":
+		if a.txStore == nil {
+			return "", fmt.Errorf("expenses are not configured on this deployment")
+		}
+		var input struct {
+			GroupBy          string `json:"group_by"`
+			Since            string `json:"since"`
+			Until            string `json:"until"`
+			Provider         string `json:"provider"`
+			Category         string `json:"category"`
+			MerchantContains string `json:"merchant_contains"`
+			CardLast4        string `json:"card_last4"`
+			Owner            string `json:"owner"`
+			Limit            *int   `json:"limit"`
+		}
+		if err := json.Unmarshal(inputJSON, &input); err != nil {
+			return "", fmt.Errorf("parse input: %w", err)
+		}
+		since, until := defaultBillingCycleRange(input.Since, input.Until)
+		limit := 20
+		if input.Limit != nil {
+			limit = *input.Limit
+		}
+
+		// Resolve optional owner filter to a list of cards via personas.md.
+		ownerCards := loadCardOwners()
+		var filterCards []db.CardRef
+		if input.Owner != "" {
+			cards, ok := ownerCards[input.Owner]
+			if !ok || len(cards) == 0 {
+				return "", fmt.Errorf("unknown owner %q — personas.md has: %s", input.Owner, strings.Join(sortedKeys(ownerCards), ", "))
+			}
+			filterCards = cards
+		}
+
+		baseFilter := db.TxFilter{
+			Since:            since,
+			Until:            until,
+			Provider:         input.Provider,
+			CardLast4:        input.CardLast4,
+			Category:         input.Category,
+			MerchantContains: input.MerchantContains,
+			DebitsOnly:       false,
+			Cards:            filterCards,
+			Limit:            limit,
+		}
+
+		var rows []db.SumRow
+		if input.GroupBy == "owner" {
+			// Aggregate per owner by calling TotalSpent with each owner's cards.
+			for _, name := range sortedKeys(ownerCards) {
+				cards := ownerCards[name]
+				f := baseFilter
+				// Owner groupby overrides any single Cards filter; but if the user
+				// ALSO passed owner=X, intersect: only that one owner appears.
+				if input.Owner != "" && input.Owner != name {
+					continue
+				}
+				f.Cards = cards
+				f.Limit = 0
+				total, err := a.txStore.TotalSpent(f)
+				if err != nil {
+					return "", err
+				}
+				total.Key = name
+				rows = append(rows, total)
+			}
+			sort.Slice(rows, func(i, j int) bool { return rows[i].SpentILS > rows[j].SpentILS })
+			if limit > 0 && len(rows) > limit {
+				rows = rows[:limit]
+			}
+		} else {
+			var err error
+			rows, err = a.txStore.SumBy(input.GroupBy, baseFilter)
+			if err != nil {
+				return "", err
+			}
+		}
+
+		resp := map[string]any{
+			"group_by": input.GroupBy,
+			"since":    since,
+			"until":    until,
+			"rows":     rows,
+		}
+		b, _ := json.Marshal(resp)
+		return string(b), nil
+
+	case "list_transactions":
+		if a.txStore == nil {
+			return "", fmt.Errorf("expenses are not configured on this deployment")
+		}
+		var input struct {
+			Since            string `json:"since"`
+			Until            string `json:"until"`
+			Provider         string `json:"provider"`
+			Category         string `json:"category"`
+			MerchantContains string `json:"merchant_contains"`
+			CardLast4        string `json:"card_last4"`
+			Owner            string `json:"owner"`
+			DebitsOnly       bool   `json:"debits_only"`
+			Limit            *int   `json:"limit"`
+		}
+		if err := json.Unmarshal(inputJSON, &input); err != nil {
+			return "", fmt.Errorf("parse input: %w", err)
+		}
+		limit := 50
+		if input.Limit != nil {
+			limit = *input.Limit
+		}
+		var filterCards []db.CardRef
+		if input.Owner != "" {
+			ownerCards := loadCardOwners()
+			cards, ok := ownerCards[input.Owner]
+			if !ok || len(cards) == 0 {
+				return "", fmt.Errorf("unknown owner %q — personas.md has: %s", input.Owner, strings.Join(sortedKeys(ownerCards), ", "))
+			}
+			filterCards = cards
+		}
+		txs, err := a.txStore.QueryTransactions(db.TxFilter{
+			Since:            input.Since,
+			Until:            input.Until,
+			Provider:         input.Provider,
+			CardLast4:        input.CardLast4,
+			Category:         input.Category,
+			MerchantContains: input.MerchantContains,
+			DebitsOnly:       input.DebitsOnly,
+			Cards:            filterCards,
+			Limit:            limit,
+		})
+		if err != nil {
+			return "", err
+		}
+		// Strip raw_json to keep the tool-result payload small.
+		for i := range txs {
+			txs[i].RawJSON = ""
+		}
+		b, _ := json.Marshal(txs)
+		return string(b), nil
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+// defaultBillingCycleRange returns the caller's since/until if both are
+// provided. Otherwise it computes the current billing cycle using BILLING_DAY
+// (default 10). A cycle runs from BILLING_DAY of one month through the day
+// before BILLING_DAY of the next month, inclusive on both ends.
+//
+// Example with BILLING_DAY=10, today=2026-04-05: cycle is 2026-03-10 → 2026-04-09.
+// Example with BILLING_DAY=10, today=2026-04-15: cycle is 2026-04-10 → 2026-05-09.
+func defaultBillingCycleRange(since, until string) (string, string) {
+	if since != "" && until != "" {
+		return since, until
+	}
+	tz := os.Getenv("TIMEZONE")
+	if tz == "" {
+		tz = "Asia/Jerusalem"
+	}
+	loc, _ := time.LoadLocation(tz)
+	now := time.Now().In(loc)
+
+	billingDay := 10
+	if v := os.Getenv("BILLING_DAY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 28 {
+			billingDay = n
+		}
+	}
+
+	// Find the cycle START: most recent (today-or-past) occurrence of billingDay.
+	var cycleStart time.Time
+	if now.Day() >= billingDay {
+		cycleStart = time.Date(now.Year(), now.Month(), billingDay, 0, 0, 0, 0, loc)
+	} else {
+		cycleStart = time.Date(now.Year(), now.Month()-1, billingDay, 0, 0, 0, 0, loc)
+	}
+	// Cycle END is day before next billingDay (inclusive).
+	cycleEnd := cycleStart.AddDate(0, 1, -1)
+
+	if since == "" {
+		since = cycleStart.Format("2006-01-02")
+	}
+	if until == "" {
+		until = cycleEnd.Format("2006-01-02")
+	}
+	return since, until
+}
+
+// trimHistory returns the most recent messages up to maxN, adjusted so the
+// first retained message is a valid conversation start:
+//
+//  1. Claude's API requires messages to begin with a user message — any leading
+//     assistant message after trimming would cause a 400.
+//  2. A tool_result block inside a user message must have its matching tool_use
+//     block present (in the preceding assistant message). If we cut in the
+//     middle of a tool call round, we'd strand a tool_result.
+//
+// The algorithm: take the tail [len-maxN:], then walk forward dropping any
+// leading message that is either an assistant message or a user message
+// containing tool_result blocks, until we find a plain user text message.
+func trimHistory(history []anthropic.MessageParam, maxN int) []anthropic.MessageParam {
+	if len(history) <= maxN {
+		return history
+	}
+	start := len(history) - maxN
+	for start < len(history) {
+		m := history[start]
+		if m.Role == anthropic.MessageParamRoleUser && !messageHasToolResult(m) {
+			break
+		}
+		start++
+	}
+	return history[start:]
+}
+
+// messageHasToolResult reports whether any content block in m is a tool_result.
+func messageHasToolResult(m anthropic.MessageParam) bool {
+	for _, block := range m.Content {
+		if block.OfToolResult != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// sortedKeys returns the keys of a map in stable sorted order.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

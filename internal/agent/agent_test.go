@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/lizozom/whatsapp-nagger/internal/db"
 	"github.com/lizozom/whatsapp-nagger/internal/version"
 )
@@ -75,6 +76,186 @@ func TestExecuteToolListTasksEmpty(t *testing.T) {
 	if result != "null" && result != "[]" {
 		// empty slice marshals to "null" in Go
 		t.Logf("empty list result: %s", result)
+	}
+}
+
+func TestParseCardOwners(t *testing.T) {
+	got := parseCardOwners("Liza:max/1518,max/4718,cal/4973;Denis:max/4327")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 owners, got %d: %+v", len(got), got)
+	}
+	if len(got["Liza"]) != 3 {
+		t.Errorf("Liza: expected 3 cards, got %d", len(got["Liza"]))
+	}
+	if got["Denis"][0].Provider != "max" || got["Denis"][0].CardLast4 != "4327" {
+		t.Errorf("Denis card wrong: %+v", got["Denis"])
+	}
+}
+
+func TestParseCardOwnersMessyWhitespace(t *testing.T) {
+	got := parseCardOwners("  Liza : MAX / 1518 , cal/4973 ;  Denis: max/4327")
+	if len(got["Liza"]) != 2 {
+		t.Errorf("Liza: expected 2 cards with whitespace tolerance, got %d", len(got["Liza"]))
+	}
+	if got["Liza"][0].Provider != "max" {
+		t.Errorf("provider should be lowercased, got %q", got["Liza"][0].Provider)
+	}
+}
+
+func TestParseCardOwnersEmpty(t *testing.T) {
+	got := parseCardOwners("")
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %+v", got)
+	}
+}
+
+// --- trimHistory tests ---
+
+func userText(s string) anthropic.MessageParam {
+	return anthropic.NewUserMessage(anthropic.NewTextBlock(s))
+}
+
+func assistantText(s string) anthropic.MessageParam {
+	return anthropic.NewAssistantMessage(anthropic.NewTextBlock(s))
+}
+
+func assistantToolUse(id, name string) anthropic.MessageParam {
+	return anthropic.NewAssistantMessage(
+		anthropic.NewToolUseBlock(id, map[string]any{}, name),
+	)
+}
+
+func userToolResult(id, result string) anthropic.MessageParam {
+	return anthropic.NewUserMessage(anthropic.NewToolResultBlock(id, result, false))
+}
+
+func TestTrimHistoryUnderLimit(t *testing.T) {
+	history := []anthropic.MessageParam{
+		userText("hi"),
+		assistantText("hello"),
+	}
+	trimmed := trimHistory(history, 20)
+	if len(trimmed) != 2 {
+		t.Errorf("under-limit history should pass through, got %d", len(trimmed))
+	}
+}
+
+func TestTrimHistoryDropsOldestTurns(t *testing.T) {
+	// 6 messages total, cap=4. Naive slice would be history[2:] = [user, asst, user, asst] — valid.
+	history := []anthropic.MessageParam{
+		userText("msg1"), assistantText("resp1"),
+		userText("msg2"), assistantText("resp2"),
+		userText("msg3"), assistantText("resp3"),
+	}
+	trimmed := trimHistory(history, 4)
+	if len(trimmed) != 4 {
+		t.Errorf("expected 4 messages, got %d", len(trimmed))
+	}
+	if trimmed[0].Role != anthropic.MessageParamRoleUser {
+		t.Errorf("first msg should be user, got %v", trimmed[0].Role)
+	}
+}
+
+func TestTrimHistoryDropsLeadingAssistant(t *testing.T) {
+	// Naive tail[2:] would be [assistant, user, assistant] — starts with assistant, invalid.
+	// trimHistory must drop the leading assistant and return [user, assistant].
+	history := []anthropic.MessageParam{
+		userText("msg1"), assistantText("resp1"),
+		userText("msg2"), assistantText("resp2"),
+	}
+	trimmed := trimHistory(history, 3)
+	if len(trimmed) == 0 {
+		t.Fatal("empty result")
+	}
+	if trimmed[0].Role != anthropic.MessageParamRoleUser {
+		t.Errorf("first msg must be user, got %v", trimmed[0].Role)
+	}
+	if len(trimmed) != 2 {
+		t.Errorf("expected 2 messages after dropping leading assistant, got %d", len(trimmed))
+	}
+}
+
+func TestTrimHistoryDropsStrandedToolResult(t *testing.T) {
+	// Conversation:
+	//   0: user "ask"
+	//   1: assistant tool_use (id=t1)
+	//   2: user tool_result (id=t1)   <-- depends on msg 1
+	//   3: assistant text "answer"
+	//   4: user "followup"
+	//   5: assistant text "final"
+	//
+	// cap=4 would naive-slice to [tool_result, assistant text, user followup, assistant final].
+	// That strands the tool_result (its tool_use is gone). trimHistory must skip
+	// to the next clean user text, i.e. msg 4.
+	history := []anthropic.MessageParam{
+		userText("ask"),
+		assistantToolUse("t1", "list_tasks"),
+		userToolResult("t1", "[]"),
+		assistantText("answer"),
+		userText("followup"),
+		assistantText("final"),
+	}
+	trimmed := trimHistory(history, 4)
+	if len(trimmed) == 0 {
+		t.Fatal("empty result")
+	}
+	// First message must be a user text message with no tool_result.
+	first := trimmed[0]
+	if first.Role != anthropic.MessageParamRoleUser {
+		t.Errorf("first must be user, got %v", first.Role)
+	}
+	if messageHasToolResult(first) {
+		t.Errorf("first user msg must not contain tool_result — it would be stranded")
+	}
+	// Expect the final two messages (followup + final).
+	if len(trimmed) != 2 {
+		t.Errorf("expected 2 messages (followup + final), got %d", len(trimmed))
+	}
+}
+
+func TestTrimHistoryKeepsCompleteToolRound(t *testing.T) {
+	// Same conversation but cap=5 — the tail is [tool_use, tool_result, answer, followup, final].
+	// That starts with assistant tool_use (invalid: must start with user). Trim
+	// should drop forward until it finds a clean user. Since tool_use and
+	// tool_result would also be stranded, it keeps [followup, final].
+	history := []anthropic.MessageParam{
+		userText("ask"),
+		assistantToolUse("t1", "list_tasks"),
+		userToolResult("t1", "[]"),
+		assistantText("answer"),
+		userText("followup"),
+		assistantText("final"),
+	}
+	trimmed := trimHistory(history, 5)
+	if trimmed[0].Role != anthropic.MessageParamRoleUser {
+		t.Errorf("first must be user, got %v", trimmed[0].Role)
+	}
+	if messageHasToolResult(trimmed[0]) {
+		t.Errorf("first user must not contain tool_result")
+	}
+}
+
+func TestDefaultBillingCycleRange(t *testing.T) {
+	t.Setenv("BILLING_DAY", "10")
+	t.Setenv("TIMEZONE", "Asia/Jerusalem")
+
+	// Explicit dates pass through unchanged.
+	since, until := defaultBillingCycleRange("2026-01-01", "2026-01-31")
+	if since != "2026-01-01" || until != "2026-01-31" {
+		t.Errorf("explicit dates should pass through, got %s / %s", since, until)
+	}
+
+	// Empty → current cycle. We can't hardcode dates (time.Now() is real),
+	// but we can assert structure: since is day-10, until is day-09.
+	since, until = defaultBillingCycleRange("", "")
+	if len(since) != 10 || len(until) != 10 {
+		t.Fatalf("expected ISO dates, got %s / %s", since, until)
+	}
+	if since[8:] != "10" {
+		t.Errorf("since should end in day 10, got %s", since)
+	}
+	if until[8:] != "09" {
+		t.Errorf("until should end in day 09, got %s", until)
 	}
 }
 
