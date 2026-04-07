@@ -276,6 +276,7 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 				"List individual credit card / bank transactions matching a filter. " +
 					"Use for drilling into specific charges (e.g. 'what did we buy at Shufersal in Feb'). " +
 					"Amounts are in ILS, negative for debits. " +
+					"If since/until are omitted, defaults to the current billing cycle (same as expenses_summary). " +
 					"Always set a limit — this can return hundreds of rows otherwise.",
 			),
 			InputSchema: anthropic.ToolInputSchemaParam{
@@ -545,6 +546,11 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
+		// Default to current billing cycle if no dates provided (same as expenses_summary).
+		since, until := defaultBillingCycleRange(input.Since, input.Until)
+		input.Since = since
+		input.Until = until
+
 		limit := 50
 		if input.Limit != nil {
 			limit = *input.Limit
@@ -559,8 +565,8 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			filterCards = cards
 		}
 		txs, err := a.txStore.QueryTransactions(db.TxFilter{
-			Since:            input.Since,
-			Until:            input.Until,
+			Since:            since,
+			Until:            until,
 			Provider:         input.Provider,
 			CardLast4:        input.CardLast4,
 			Category:         input.Category,
