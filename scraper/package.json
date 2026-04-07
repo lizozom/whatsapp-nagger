@@ -10,7 +10,7 @@
     "cal": "tsx src/index.ts --provider=cal"
   },
   "dependencies": {
-    "israeli-bank-scrapers": "^5.0.0"
+    "israeli-bank-scrapers": "^6.7.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
