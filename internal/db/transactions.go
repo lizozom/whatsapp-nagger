@@ -293,9 +293,8 @@ func (s *TxStore) QueryTransactions(filter TxFilter) ([]Transaction, error) {
 	var orderBy string
 	switch filter.SortBy {
 	case "amount":
-		// Largest absolute amount first — works for both "biggest charges"
-		// (with debits_only=true) and "biggest transactions" generally.
-		orderBy = "ORDER BY ABS(amount_ils) DESC, posted_at DESC"
+		// Most negative first = biggest charges first.
+		orderBy = "ORDER BY amount_ils ASC, posted_at DESC"
 	default: // "date" or empty
 		orderBy = "ORDER BY posted_at DESC, id ASC"
 	}
