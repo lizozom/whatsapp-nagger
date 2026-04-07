@@ -291,8 +291,8 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 					"debits_only":       map[string]any{"type": "boolean", "description": "If true, only debits. Optional."},
 					"sort_by": map[string]any{
 						"type":        "string",
-						"enum":        []string{"date", "amount_asc", "amount_desc"},
-						"description": "Sort order: 'date' (default, newest first), 'amount_asc' (smallest first), 'amount_desc' (largest debits first). Use 'amount_asc' for 'top/biggest/highest charges'.",
+						"enum":        []string{"date", "amount"},
+						"description": "Sort order: 'date' (default, newest first) or 'amount' (largest absolute amount first). Use 'amount' with debits_only=true for 'top/biggest/highest charges'.",
 					},
 					"limit":             map[string]any{"type": "integer", "description": "Max rows to return (default 50)."},
 				},
