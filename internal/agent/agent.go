@@ -40,8 +40,11 @@ Tool-use rules (follow objectively — no personality here):
   - Owners are defined in CARD_OWNERS env var. Use group_by="owner" to compare family members, or filter "owner" to scope to one person (e.g. "how much did I spend" → owner filter for the requesting user, resolved from the [Sender] prefix).
   - Amounts are ILS. Always report spent_ils as the answer to "how much did we spend" — it is NET of refunds, so a ₪1,000 purchase fully refunded shows as ₪0 spent (not ₪1,000). Only mention charges_ils / refunds_ils if the user asks for a breakdown or the refund context is interesting (e.g. "you returned half of what you bought at TerminalX").
   - spent_ils can be negative if a category had more refunds than charges in the period — report it as a net credit rather than "negative spending".
-  - Max provider categories are unreliable — Wolt in particular is mostly groceries, not restaurants. Note this in your answer if the user asks about food/eating-out categories.
+  - Provider categories from Cal/Max are unreliable. Use the merchant context notes below to override categories when presenting results.
   - When presenting results, round to whole shekels, translate Hebrew category names if helpful, and include the date range you used.
+
+Merchant context (use this to correct category misattributions and add local knowledge):
+%s
 
 Response style (apply only to your text replies, not tool calls):
 - Keep responses short and direct.
@@ -70,6 +73,10 @@ func buildSystemPrompt() string {
 	now := time.Now().In(loc)
 
 	members := loadPersonas()
+	merchantCtx := os.Getenv("MERCHANT_CONTEXT")
+	if merchantCtx == "" {
+		merchantCtx = "(none configured)"
+	}
 
 	return fmt.Sprintf(systemPromptTemplate,
 		version.Version,
@@ -78,6 +85,7 @@ func buildSystemPrompt() string {
 		now.Weekday().String(),
 		tz,
 		members,
+		merchantCtx,
 	)
 }
 
