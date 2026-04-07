@@ -213,6 +213,7 @@ type TxFilter struct {
 	MerchantContains string // case-insensitive substring match on description
 	DebitsOnly       bool   // if true, only amount_ils < 0
 	Cards            []CardRef // if non-empty, restrict to these (provider, last4) pairs (OR'd)
+	SortBy           string // "date" (default), "amount_asc" (smallest first), "amount_desc" (largest debits first)
 	Limit            int    // 0 = no limit
 }
 
@@ -289,8 +290,17 @@ func (s *TxStore) SumBy(groupBy string, filter TxFilter) ([]SumRow, error) {
 // supporting category / merchant / debits-only filters.
 func (s *TxStore) QueryTransactions(filter TxFilter) ([]Transaction, error) {
 	where, args := buildTxWhere(filter)
+	var orderBy string
+	switch filter.SortBy {
+	case "amount_asc":
+		orderBy = "ORDER BY amount_ils ASC, posted_at DESC"
+	case "amount_desc":
+		orderBy = "ORDER BY amount_ils DESC, posted_at DESC"
+	default: // "date" or empty
+		orderBy = "ORDER BY posted_at DESC, id ASC"
+	}
 	q := `SELECT id, provider, card_last4, posted_at, amount_ils, description, memo, category, status, raw_json, ingested_at
-	      FROM transactions ` + where + ` ORDER BY posted_at DESC, id ASC`
+	      FROM transactions ` + where + ` ` + orderBy
 	if filter.Limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}

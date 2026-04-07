@@ -288,6 +288,11 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 					"card_last4":        map[string]any{"type": "string", "description": "Card last4. Optional."},
 					"owner":             map[string]any{"type": "string", "description": "Family member name — filters to their cards (e.g. 'Alice', 'Bob'). Optional."},
 					"debits_only":       map[string]any{"type": "boolean", "description": "If true, only debits. Optional."},
+					"sort_by": map[string]any{
+						"type":        "string",
+						"enum":        []string{"date", "amount_asc", "amount_desc"},
+						"description": "Sort order: 'date' (default, newest first), 'amount_asc' (smallest first), 'amount_desc' (largest debits first). Use 'amount_asc' for 'top/biggest/highest charges'.",
+					},
 					"limit":             map[string]any{"type": "integer", "description": "Max rows to return (default 50)."},
 				},
 			},
@@ -534,6 +539,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			CardLast4        string `json:"card_last4"`
 			Owner            string `json:"owner"`
 			DebitsOnly       bool   `json:"debits_only"`
+			SortBy           string `json:"sort_by"`
 			Limit            *int   `json:"limit"`
 		}
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
@@ -560,6 +566,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			Category:         input.Category,
 			MerchantContains: input.MerchantContains,
 			DebitsOnly:       input.DebitsOnly,
+			SortBy:           input.SortBy,
 			Cards:            filterCards,
 			Limit:            limit,
 		})
