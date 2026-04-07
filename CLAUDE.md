@@ -1,6 +1,6 @@
 # whatsapp-nagger
 
-A proactive WhatsApp-based agent that lives in a family group chat. Manages a shared task backlog, sends reminders (nags), and provides daily summaries. Tone: no-nonsense Israeli software engineer — pragmatic, direct, slightly sarcastic.
+A proactive WhatsApp-based agent that lives in a family group chat. Manages a shared task backlog, tracks credit card expenses, sends reminders (nags), and provides daily summaries. Tone: no-nonsense Israeli software engineer — pragmatic, direct, slightly sarcastic.
 
 Environment: Private WhatsApp family group.
 
@@ -8,57 +8,61 @@ Environment: Private WhatsApp family group.
 
 - **Language:** Go
 - **WhatsApp:** whatsmeow (Multi-Device API)
-- **AI:** Anthropic Claude 4.5 Sonnet (tool calling)
-- **Database:** SQLite (tasks, session, event log)
+- **AI:** Anthropic Claude Haiku 4.5 (tool calling)
+- **Database:** SQLite (tasks, metadata, transactions, ingest runs)
+- **Scraper:** TypeScript + israeli-bank-scrapers (Cal, Max)
 - **Deploy:** Fly.io (persistent volume for SQLite)
+- **Scheduling:** macOS launchd (scraper), in-process ticker (daily digest)
 
 ## Architecture
 
 Observe → Reason → Act loop.
 
-### Phase 1: Dev Mode (current)
-
-- `IMessenger` interface wrapping stdin/stdout
-- Terminal input simulates group messages: `[User]: I'll do the dishes later`
-- Local `tasks.db`
-
-### Phase 2: Production
-
-- Linked device via whatsmeow (no second SIM needed)
-- Triggers: inbound messages (real-time) + scheduled daily digest ("Wall of Shame")
+- `IMessenger` interface wraps terminal (dev) or WhatsApp (prod)
+- Claude agent uses tool calling for task CRUD + expense queries
+- SQLite is the single source of truth for tasks and transactions
+- Transaction scraper runs as a separate Node sidecar on a local Mac, pushes via HMAC-authenticated HTTP to the bot on Fly
 
 ## Data Schema (SQLite)
 
 ```sql
-tasks: id, content, assignee, status (pending/done), created_at, updated_at
-metadata: key, value  -- e.g. last processed message timestamp
+tasks: id, content, assignee, status (pending/done), due_date, created_at, updated_at
+metadata: key, value  -- e.g. last_digest_date
+
+transactions: id (stable hash), provider, card_last4, posted_at, amount_ils,
+              description, memo, category, status (pending/posted), raw_json, ingested_at
+ingest_runs: id, provider, started_at, finished_at, status, error, tx_count
 ```
 
-## Agent System Prompt
+## Agent Tools
 
-> You are whatsapp-nagger. Your job is to ensure the family backlog is cleared.
-> If a task is mentioned, log it. If a task is finished, mark it.
-> If a task is rotting, nag the assignee with a dry, sarcastic remark.
->
-> Tone: "The sink has been broken for 4 days. I assume we are waiting for a miracle. Fix it."
->
-> Keep it short. No "As an AI" or "I am happy to help". Just do the work.
+Task tools: `add_task`, `list_tasks`, `update_task`, `delete_task`
 
-## Development Milestones
+Expense tools:
+- `expenses_summary` — aggregate by category/merchant/month/provider/card_last4/owner. Default range is current billing cycle (BILLING_DAY env var). spent_ils is net of refunds.
+- `list_transactions` — drill into individual charges with filters (date, provider, category, merchant_contains, owner, debits_only).
 
-- [ ] Mock Loop — Go CLI piping stdin to Claude 4.5 Sonnet, SQLite ops via tool calling
-- [ ] Backlog Logic — "Daily Summary" generator
-- [ ] SIM Integration — Switch `IMessenger` from terminal to whatsmeow
-- [ ] Deployment — Dockerize, push to Railway with persistent volume
+Owner resolution: `CARD_OWNERS` env var maps names to provider/last4 pairs. The LLM resolves "how much did I spend?" via the [Sender] prefix.
 
 ## Commands
 
 ```bash
-# Run (once built)
+# Run in terminal mode
 go run ./cmd/nagger
+
+# Run in WhatsApp mode
+MESSENGER=whatsapp go run ./cmd/nagger
 
 # Test
 go test ./...
+
+# Run scraper (from scraper/ directory)
+npm start                    # default provider (max)
+npm start -- --provider=cal
+npm start -- --dry-run
+
+# Deploy
+bash deploy.sh
 ```
 
 ## Conventions
@@ -66,4 +70,8 @@ go test ./...
 - Keep code flat — minimal abstraction until patterns emerge
 - `IMessenger` interface is the seam between dev and prod modes
 - All Claude interactions use tool calling (not free-form text parsing)
-- SQLite is the single source of truth for task state
+- SQLite is the single source of truth for task and transaction state
+- Structured config (card ownership, billing day) goes in env vars, not markdown files
+- Personal identifiers (names, phones, card numbers) must only appear in gitignored files (.env, personas.md) — use placeholders (Alice/Bob) in committed code and tests
+- Conversation history is capped at 20 messages to bound token usage
+- Never auto-bump versions; user controls version manually
