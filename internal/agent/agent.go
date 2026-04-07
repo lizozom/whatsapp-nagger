@@ -288,7 +288,8 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 					"merchant_contains": map[string]any{"type": "string", "description": "Substring match on description. Optional."},
 					"card_last4":        map[string]any{"type": "string", "description": "Card last4. Optional."},
 					"owner":             map[string]any{"type": "string", "description": "Family member name — filters to their cards (e.g. 'Alice', 'Bob'). Optional."},
-					"debits_only":       map[string]any{"type": "boolean", "description": "If true, only debits. Optional."},
+					"debits_only":       map[string]any{"type": "boolean", "description": "If true, only debits (charges). Optional."},
+					"credits_only":      map[string]any{"type": "boolean", "description": "If true, only credits (refunds). Use for 'show me refunds'. Optional."},
 					"sort_by": map[string]any{
 						"type":        "string",
 						"enum":        []string{"date", "amount"},
@@ -540,6 +541,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			CardLast4        string `json:"card_last4"`
 			Owner            string `json:"owner"`
 			DebitsOnly       bool   `json:"debits_only"`
+			CreditsOnly      bool   `json:"credits_only"`
 			SortBy           string `json:"sort_by"`
 			Limit            *int   `json:"limit"`
 		}
@@ -572,6 +574,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			Category:         input.Category,
 			MerchantContains: input.MerchantContains,
 			DebitsOnly:       input.DebitsOnly,
+			CreditsOnly:      input.CreditsOnly,
 			SortBy:           input.SortBy,
 			Cards:            filterCards,
 			Limit:            limit,

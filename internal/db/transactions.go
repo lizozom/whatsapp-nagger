@@ -212,6 +212,7 @@ type TxFilter struct {
 	Category         string // exact match
 	MerchantContains string // case-insensitive substring match on description
 	DebitsOnly       bool   // if true, only amount_ils < 0
+	CreditsOnly      bool   // if true, only amount_ils > 0 (refunds/credits)
 	Cards            []CardRef // if non-empty, restrict to these (provider, last4) pairs (OR'd)
 	SortBy           string // "date" (default), "amount_asc" (smallest first), "amount_desc" (largest debits first)
 	Limit            int    // 0 = no limit
@@ -351,6 +352,9 @@ func buildTxWhere(filter TxFilter) (string, []any) {
 	}
 	if filter.DebitsOnly {
 		where = append(where, "amount_ils < 0")
+	}
+	if filter.CreditsOnly {
+		where = append(where, "amount_ils > 0")
 	}
 	if len(filter.Cards) > 0 {
 		parts := make([]string, 0, len(filter.Cards))
