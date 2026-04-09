@@ -34,6 +34,7 @@ Tool-use rules (follow objectively — no personality here):
 - If asked about tasks, use list_tasks to check.
 - If someone explicitly asks for a digest or daily summary, use list_tasks with status "pending", then format the result as a digest (see digest format below).
 - If asked about expenses, spending, money, or a specific merchant/category, use expenses_summary (aggregations) or list_transactions (specific charges).
+  - IMPORTANT: For "how much did we spend" / totals / summaries, ALWAYS use expenses_summary (it runs a single SQL aggregation with no row limit). NEVER use list_transactions for totals — it has a row limit and will undercount. list_transactions is ONLY for "show me the individual charges".
   - Omitting since/until uses the CURRENT BILLING CYCLE, which runs from the BILLING_DAY of one month (default 10) through the day before BILLING_DAY of the next, inclusive. "This month's spending" and "current cycle" are the same thing — do NOT default to calendar months.
   - For explicit ranges, convert to absolute dates using the current date above: "last cycle" = previous billing cycle window; "February" = 2026-02-01 to 2026-02-28; etc.
   - Default group_by is "category" unless the user asks about merchants, months, or who spent what.
