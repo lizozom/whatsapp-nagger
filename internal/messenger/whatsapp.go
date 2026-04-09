@@ -81,41 +81,8 @@ func NewWhatsApp(dbPath string, groupJID string) (*WhatsApp, error) {
 
 	client.AddEventHandler(wa.handleEvent)
 
-	// Start HTTP server for health checks and QR pairing page
-	go func() {
-		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			if wa.paired {
-				fmt.Fprint(w, "paired")
-			} else {
-				fmt.Fprint(w, "waiting for QR pairing")
-			}
-		})
-		http.HandleFunc("/pair", func(w http.ResponseWriter, r *http.Request) {
-			token := os.Getenv("QR_TOKEN")
-			if token != "" && r.URL.Query().Get("token") != token {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			w.Header().Set("Content-Type", "text/html")
-			if wa.paired {
-				fmt.Fprint(w, "<h1>Already paired!</h1>")
-				return
-			}
-			if wa.pairCode == "" {
-				fmt.Fprint(w, `<h1>Generating pairing code...</h1><meta http-equiv='refresh' content='3'>`)
-				return
-			}
-			fmt.Fprintf(w, `<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;margin:0;flex-direction:column;font-family:sans-serif">
-<h2>WhatsApp Pairing Code</h2>
-<p style="font-size:48px;letter-spacing:8px;font-weight:bold">%s</p>
-<p>Open WhatsApp &gt; Linked Devices &gt; Link a Device &gt; Link with phone number</p>
-<p>Enter this code. It expires in ~2 minutes.</p>
-<meta http-equiv='refresh' content='10'>
-</body></html>`, wa.pairCode)
-		})
-		http.ListenAndServe(":8080", nil)
-	}()
+	// HTTP routes are registered externally via RegisterRoutes.
+	// The caller (main.go) owns the mux and the listener.
 
 	if !wa.paired {
 		// Run phone pairing in background — don't block startup
@@ -259,6 +226,60 @@ func (wa *WhatsApp) Write(text string) error {
 		return fmt.Errorf("not paired yet — scan QR code first")
 	}
 	_, err := wa.client.SendMessage(context.Background(), wa.groupJID, &waE2E.Message{
+		Conversation: proto.String(text),
+	})
+	return err
+}
+
+// RegisterRoutes adds WhatsApp-specific HTTP handlers (health check, pairing
+// page) to the provided mux. Call this from main.go instead of having the
+// WhatsApp struct start its own HTTP listener.
+func (wa *WhatsApp) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if wa.paired {
+			fmt.Fprint(w, "paired")
+		} else {
+			fmt.Fprint(w, "waiting for QR pairing")
+		}
+	})
+	mux.HandleFunc("/pair", func(w http.ResponseWriter, r *http.Request) {
+		token := os.Getenv("QR_TOKEN")
+		if token != "" && r.URL.Query().Get("token") != token {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if wa.paired {
+			fmt.Fprint(w, "<h1>Already paired!</h1>")
+			return
+		}
+		if wa.pairCode == "" {
+			fmt.Fprint(w, `<h1>Generating pairing code...</h1><meta http-equiv='refresh' content='3'>`)
+			return
+		}
+		fmt.Fprintf(w, `<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;margin:0;flex-direction:column;font-family:sans-serif">
+<h2>WhatsApp Pairing Code</h2>
+<p style="font-size:48px;letter-spacing:8px;font-weight:bold">%s</p>
+<p>Open WhatsApp &gt; Linked Devices &gt; Link a Device &gt; Link with phone number</p>
+<p>Enter this code. It expires in ~2 minutes.</p>
+<meta http-equiv='refresh' content='10'>
+</body></html>`, wa.pairCode)
+	})
+}
+
+// SendDM sends a direct (private) message to an individual phone number.
+// phone should be in international format without +, e.g. "972501234567".
+// This is NOT part of the IMessenger interface — it's used for OTP delivery.
+func (wa *WhatsApp) SendDM(phone, text string) error {
+	if !wa.paired {
+		return fmt.Errorf("not paired yet")
+	}
+	jid, err := types.ParseJID(phone + "@s.whatsapp.net")
+	if err != nil {
+		return fmt.Errorf("invalid phone %q: %w", phone, err)
+	}
+	_, err = wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		Conversation: proto.String(text),
 	})
 	return err

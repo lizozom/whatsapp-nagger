@@ -8,6 +8,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/lizozom/whatsapp-nagger/internal/agent"
+	"github.com/lizozom/whatsapp-nagger/internal/api"
 	"github.com/lizozom/whatsapp-nagger/internal/db"
 	"github.com/lizozom/whatsapp-nagger/internal/ingest"
 	"github.com/lizozom/whatsapp-nagger/internal/messenger"
@@ -27,8 +28,6 @@ func main() {
 	}
 	defer store.Close()
 
-	// Transaction store (expense tracking). Always opened — the agent uses it
-	// for the expense tools, and the ingest server (below) writes to it.
 	txStore, err := db.NewTxStore(tasksDBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open tx store: %v\n", err)
@@ -38,41 +37,63 @@ func main() {
 
 	a := agent.NewAgent(store, txStore)
 
-	// Optional ingest HTTP server for external scrapers (Cal / Max / ...).
-	// Enabled when INGEST_SECRET is set.
+	// --- Single HTTP mux for all endpoints ---
+	mux := http.NewServeMux()
+
+	// Healthz (always available).
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	// Ingest endpoint (opt-in via INGEST_SECRET).
 	if secret := os.Getenv("INGEST_SECRET"); secret != "" {
-		port := os.Getenv("INGEST_PORT")
-		if port == "" {
-			port = "8080"
-		}
-		srv := ingest.NewServer(":"+port, ingest.NewHandler(txStore, secret))
-		go func() {
-			fmt.Fprintf(os.Stderr, "Ingest server listening on :%s\n", port)
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				fmt.Fprintf(os.Stderr, "Ingest server error: %v\n", err)
-			}
-		}()
+		mux.Handle("/ingest/transactions", ingest.NewHandler(txStore, secret))
 	}
 
+	// Dashboard API (opt-in via DASHBOARD_API_KEY).
+	if apiKey := os.Getenv("DASHBOARD_API_KEY"); apiKey != "" {
+		router := api.NewRouter(store, txStore, apiKey)
+		router.Register(mux)
+		fmt.Fprintln(os.Stderr, "Dashboard API enabled.")
+	}
+
+	// Messenger setup.
 	var m messenger.IMessenger
 	switch os.Getenv("MESSENGER") {
 	case "whatsapp":
-		groupJID := os.Getenv("WHATSAPP_GROUP_JID") // empty = discovery mode
+		groupJID := os.Getenv("WHATSAPP_GROUP_JID")
 		dbPath := os.Getenv("WHATSAPP_DB_PATH")
 		if dbPath == "" {
 			dbPath = "whatsapp_session.db"
 		}
-		m, err = messenger.NewWhatsApp(dbPath, groupJID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to init WhatsApp: %v\n", err)
+		wa, waErr := messenger.NewWhatsApp(dbPath, groupJID)
+		if waErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to init WhatsApp: %v\n", waErr)
 			os.Exit(1)
 		}
+		// Register WhatsApp HTTP routes (pairing page, health) on the shared mux.
+		wa.RegisterRoutes(mux)
+		m = wa
 		fmt.Fprintln(os.Stderr, "WhatsApp messenger connected.")
 	default:
 		term := messenger.NewTerminal()
 		term.Write("Online. Type [Name]: message to start. Ctrl+C to quit.")
 		m = term
 	}
+
+	// Start the single HTTP server.
+	port := os.Getenv("INGEST_PORT")
+	if port == "" {
+		port = "8080"
+	}
+	srv := api.NewServer(":"+port, mux)
+	go func() {
+		fmt.Fprintf(os.Stderr, "HTTP server listening on :%s\n", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
+		}
+	}()
 
 	if digestHour := os.Getenv("DIGEST_HOUR"); digestHour != "" {
 		go startDigestScheduler(digestHour, a, m, store)
