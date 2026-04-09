@@ -243,8 +243,9 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 					"Use for questions like 'how much did we spend this month', " +
 					"'top categories in February', 'top merchants this year', " +
 					"'how much did Alice spend vs Bob'. " +
-					"Amounts are in ILS. spent_ils is the NET outflow (charges minus refunds) — " +
-					"report THIS when the user asks 'how much did we spend'. " +
+					"Amounts are in ILS. The response always includes total_spent_ils (the grand total " +
+					"across ALL rows, unaffected by the limit) — ALWAYS report this as the headline number. " +
+					"Each row's spent_ils is the NET outflow for that group. " +
 					"charges_ils is gross debits and refunds_ils is gross credits, for transparency only. " +
 					"Default date range is the CURRENT BILLING CYCLE if since/until are omitted " +
 					"(cycles run from BILLING_DAY of one month through the day before BILLING_DAY of the next).",
@@ -520,11 +521,24 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			}
 		}
 
+		// Always include the overall total so the LLM doesn't need to sum rows
+		// (which may be truncated by the limit).
+		total, _ := a.txStore.TotalSpent(db.TxFilter{
+			Since:    since,
+			Until:    until,
+			Provider: input.Provider,
+			Cards:    filterCards,
+		})
+
 		resp := map[string]any{
-			"group_by": input.GroupBy,
-			"since":    since,
-			"until":    until,
-			"rows":     rows,
+			"group_by":           input.GroupBy,
+			"since":              since,
+			"until":              until,
+			"rows":               rows,
+			"total_spent_ils":    total.SpentILS,
+			"total_charges_ils":  total.ChargesILS,
+			"total_refunds_ils":  total.RefundsILS,
+			"total_tx_count":     total.TxCount,
 		}
 		b, _ := json.Marshal(resp)
 		return string(b), nil
