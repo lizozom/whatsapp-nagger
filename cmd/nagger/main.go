@@ -51,13 +51,6 @@ func main() {
 		mux.Handle("/ingest/transactions", ingest.NewHandler(txStore, secret))
 	}
 
-	// Dashboard API (opt-in via DASHBOARD_API_KEY).
-	if apiKey := os.Getenv("DASHBOARD_API_KEY"); apiKey != "" {
-		router := api.NewRouter(store, txStore, apiKey)
-		router.Register(mux)
-		fmt.Fprintln(os.Stderr, "Dashboard API enabled.")
-	}
-
 	// Messenger setup.
 	var m messenger.IMessenger
 	switch os.Getenv("MESSENGER") {
