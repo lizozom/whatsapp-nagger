@@ -53,7 +53,7 @@ func main() {
 
 	// Messenger setup.
 	var m messenger.IMessenger
-	var dmSender api.DMSender // non-nil only in WhatsApp mode
+	var otpSender api.OTPSender // non-nil only in WhatsApp mode
 	switch os.Getenv("MESSENGER") {
 	case "whatsapp":
 		groupJID := os.Getenv("WHATSAPP_GROUP_JID")
@@ -68,7 +68,7 @@ func main() {
 		}
 		wa.RegisterRoutes(mux)
 		m = wa
-		dmSender = wa
+		otpSender = wa
 		fmt.Fprintln(os.Stderr, "WhatsApp messenger connected.")
 	default:
 		term := messenger.NewTerminal()
@@ -81,7 +81,7 @@ func main() {
 		allowlist := api.BuildAllowlist(api.LoadPersonasFile())
 		auth := &api.AuthHandler{
 			OTP:       api.NewOTPStore(5 * time.Minute),
-			DM:        dmSender,
+			DM:        otpSender,
 			Allowlist: allowlist,
 			JWTSecret: []byte(jwtSecret),
 		}

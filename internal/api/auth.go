@@ -10,16 +10,18 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// DMSender is implemented by *messenger.WhatsApp — kept as an interface so
-// auth doesn't import the messenger package directly.
-type DMSender interface {
+// OTPSender sends OTP codes to users. Implemented by *messenger.WhatsApp.
+// Uses group message as fallback since WhatsApp linked devices can't DM
+// their own phone number.
+type OTPSender interface {
 	SendDM(phone, text string) error
+	Write(text string) error // group message fallback
 }
 
 // AuthHandler holds dependencies for the OTP auth endpoints.
 type AuthHandler struct {
 	OTP       *OTPStore
-	DM        DMSender       // nil in terminal mode — OTP disabled
+	DM        OTPSender      // nil in terminal mode — OTP disabled
 	Allowlist map[string]string // phone → name (from personas)
 	JWTSecret []byte
 }
@@ -65,7 +67,12 @@ func (ah *AuthHandler) handleOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := ah.DM.SendDM(req.Phone, fmt.Sprintf("Your Nagger dashboard code: %s\nExpires in 5 minutes.", code)); err != nil {
+	name := ah.Allowlist[req.Phone]
+	otpMsg := fmt.Sprintf("Dashboard code for %s: %s\nExpires in 5 minutes.", name, code)
+
+	// Send via group message. DMs don't work when the bot is linked to the
+	// same phone as the requester (WhatsApp silently drops them).
+	if err := ah.DM.Write(otpMsg); err != nil {
 		http.Error(w, "failed to send OTP: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -113,7 +120,7 @@ func (ah *AuthHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		"sub":   req.Phone,
 		"name":  name,
 		"iat":   time.Now().Unix(),
-		"exp":   time.Now().Add(7 * 24 * time.Hour).Unix(),
+		"exp":   time.Now().Add(365 * 24 * time.Hour).Unix(),
 	})
 	signed, err := token.SignedString(ah.JWTSecret)
 	if err != nil {
