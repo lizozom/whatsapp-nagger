@@ -53,6 +53,7 @@ func main() {
 
 	// Messenger setup.
 	var m messenger.IMessenger
+	var dmSender api.DMSender // non-nil only in WhatsApp mode
 	switch os.Getenv("MESSENGER") {
 	case "whatsapp":
 		groupJID := os.Getenv("WHATSAPP_GROUP_JID")
@@ -65,14 +66,27 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Failed to init WhatsApp: %v\n", waErr)
 			os.Exit(1)
 		}
-		// Register WhatsApp HTTP routes (pairing page, health) on the shared mux.
 		wa.RegisterRoutes(mux)
 		m = wa
+		dmSender = wa
 		fmt.Fprintln(os.Stderr, "WhatsApp messenger connected.")
 	default:
 		term := messenger.NewTerminal()
 		term.Write("Online. Type [Name]: message to start. Ctrl+C to quit.")
 		m = term
+	}
+
+	// Dashboard auth (WhatsApp OTP → JWT).
+	if jwtSecret := os.Getenv("JWT_SECRET"); jwtSecret != "" {
+		allowlist := api.BuildAllowlist(api.LoadPersonasFile())
+		auth := &api.AuthHandler{
+			OTP:       api.NewOTPStore(5 * time.Minute),
+			DM:        dmSender,
+			Allowlist: allowlist,
+			JWTSecret: []byte(jwtSecret),
+		}
+		auth.RegisterAuthRoutes(mux)
+		fmt.Fprintf(os.Stderr, "Dashboard auth enabled (%d allowed phones).\n", len(allowlist))
 	}
 
 	// Start the single HTTP server.

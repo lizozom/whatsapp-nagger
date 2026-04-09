@@ -3,9 +3,6 @@ primary_region = 'fra'
 
 [build]
 
-[processes]
-  app = 'nagger'
-
 [mounts]
   source = 'nagger_data'
   destination = '/data'
@@ -15,14 +12,14 @@ primary_region = 'fra'
   WHATSAPP_DB_PATH = '/data/whatsapp_session.db'
   TASKS_DB_PATH = '/data/tasks.db'
   PERSONAS_FILE = '/data/personas.md'
+  NEXT_PUBLIC_BILLING_DAY = '10'
 
 [http_service]
-  internal_port = 8080
+  internal_port = 3000
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
-  processes = ['app']
 
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '256mb'
+  memory = '512mb'

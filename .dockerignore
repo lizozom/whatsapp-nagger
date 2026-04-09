@@ -1,0 +1,9 @@
+.git
+*.db
+*.db-wal
+*.db-shm
+.env
+personas.md
+scraper/node_modules
+dashboard/node_modules
+dashboard/.next
