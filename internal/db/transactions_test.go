@@ -138,15 +138,18 @@ func TestSumByCategory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SumBy: %v", err)
 	}
-	// Expect 2 categories: groceries (200) and restaurants (230).
+	// With normalization:
+	//   SHUFERSAL (מזון וצריכה)     → Groceries:   200
+	//   WOLT (מסעדות...)            → Groceries:   150 (merchant override)
+	//   CAFE (מסעדות...)            → Restaurants:  80
+	// Expected: Groceries 350 (2 tx), Restaurants 80 (1 tx).
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 groups, got %d: %+v", len(rows), rows)
 	}
-	// Top group by spent_ils should be restaurants (230 > 200).
-	if rows[0].Key != "מסעדות, קפה וברים" || rows[0].SpentILS != 230 {
+	if rows[0].Key != "Groceries" || rows[0].SpentILS != 350 {
 		t.Errorf("top row wrong: %+v", rows[0])
 	}
-	if rows[1].Key != "מזון וצריכה" || rows[1].SpentILS != 200 {
+	if rows[1].Key != "Restaurants" || rows[1].SpentILS != 80 {
 		t.Errorf("second row wrong: %+v", rows[1])
 	}
 }

@@ -1,19 +1,54 @@
 import { getDb } from "../db";
 import type { SumRow, Transaction, MonthlySpend } from "../types";
+import { normalizeCategory } from "../categories";
 
+interface RawRow {
+  description: string;
+  category: string;
+  amount_ils: number;
+}
+
+/**
+ * Groups transactions by NORMALIZED category. Fetches raw rows and
+ * aggregates in JS so we can apply merchant overrides (which SQL can't do
+ * without a complex CASE expression).
+ */
 export function sumByCategory(since: string, until: string): SumRow[] {
-  return getDb()
+  const fullRows = getDb()
     .prepare(
-      `SELECT COALESCE(NULLIF(category,''), '(uncategorized)') AS key,
-              COUNT(*) AS tx_count,
-              ROUND(-SUM(amount_ils), 2) AS spent_ils,
-              ROUND(SUM(CASE WHEN amount_ils < 0 THEN -amount_ils ELSE 0 END), 2) AS charges_ils,
-              ROUND(SUM(CASE WHEN amount_ils > 0 THEN amount_ils ELSE 0 END), 2) AS refunds_ils
+      `SELECT description, COALESCE(category, '') AS category, amount_ils
        FROM transactions
-       WHERE posted_at >= ? AND posted_at <= ?
-       GROUP BY key ORDER BY spent_ils DESC`,
+       WHERE posted_at >= ? AND posted_at <= ?`,
     )
-    .all(since, until) as SumRow[];
+    .all(since, until) as RawRow[];
+
+  const byKey: Record<string, SumRow> = {};
+  for (const r of fullRows) {
+    const key = normalizeCategory(r.description, r.category);
+    if (!byKey[key]) {
+      byKey[key] = {
+        key,
+        tx_count: 0,
+        spent_ils: 0,
+        charges_ils: 0,
+        refunds_ils: 0,
+      };
+    }
+    const bucket = byKey[key];
+    bucket.tx_count++;
+    bucket.spent_ils += -r.amount_ils;
+    if (r.amount_ils < 0) bucket.charges_ils += -r.amount_ils;
+    if (r.amount_ils > 0) bucket.refunds_ils += r.amount_ils;
+  }
+
+  return Object.values(byKey)
+    .map((r) => ({
+      ...r,
+      spent_ils: Math.round(r.spent_ils * 100) / 100,
+      charges_ils: Math.round(r.charges_ils * 100) / 100,
+      refunds_ils: Math.round(r.refunds_ils * 100) / 100,
+    }))
+    .sort((a, b) => b.spent_ils - a.spent_ils);
 }
 
 export function sumByMerchant(

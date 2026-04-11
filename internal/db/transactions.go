@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/lizozom/whatsapp-nagger/internal/categories"
 	_ "modernc.org/sqlite"
 )
 
@@ -238,10 +241,14 @@ type SumRow struct {
 // totals. Allowed groupBy values: "category", "merchant", "month", "provider",
 // "card_last4". Rows are ordered by spent_ils DESC.
 func (s *TxStore) SumBy(groupBy string, filter TxFilter) ([]SumRow, error) {
+	// "category" uses merchant-aware normalization which SQL can't express
+	// cleanly, so we fetch raw rows and aggregate in Go.
+	if groupBy == "category" {
+		return s.sumByNormalizedCategory(filter)
+	}
+
 	var expr string
 	switch groupBy {
-	case "category":
-		expr = "COALESCE(NULLIF(category,''), '(uncategorized)')"
 	case "merchant":
 		expr = "description"
 	case "month":
@@ -285,6 +292,62 @@ func (s *TxStore) SumBy(groupBy string, filter TxFilter) ([]SumRow, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// sumByNormalizedCategory fetches raw rows and groups by normalized
+// category (applying merchant overrides from the categories package).
+func (s *TxStore) sumByNormalizedCategory(filter TxFilter) ([]SumRow, error) {
+	where, args := buildTxWhere(filter)
+	q := `SELECT description, COALESCE(category, ''), amount_ils
+	      FROM transactions ` + where
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sum by category: %w", err)
+	}
+	defer rows.Close()
+
+	byKey := make(map[string]*SumRow)
+	for rows.Next() {
+		var desc, rawCat string
+		var amount float64
+		if err := rows.Scan(&desc, &rawCat, &amount); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		key := categories.Normalize(desc, rawCat)
+		r, ok := byKey[key]
+		if !ok {
+			r = &SumRow{Key: key}
+			byKey[key] = r
+		}
+		r.TxCount++
+		r.SpentILS += -amount
+		if amount < 0 {
+			r.ChargesILS += -amount
+		} else if amount > 0 {
+			r.RefundsILS += amount
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]SumRow, 0, len(byKey))
+	for _, r := range byKey {
+		r.SpentILS = roundCents(r.SpentILS)
+		r.ChargesILS = roundCents(r.ChargesILS)
+		r.RefundsILS = roundCents(r.RefundsILS)
+		out = append(out, *r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SpentILS > out[j].SpentILS })
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return out, nil
+}
+
+func roundCents(v float64) float64 {
+	return math.Round(v*100) / 100
 }
 
 // QueryTransactions is like ListTransactions but accepts the shared TxFilter,
