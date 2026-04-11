@@ -11,6 +11,7 @@ import {
   getSortedRowModel,
   SortingState,
   useReactTable,
+  Row as TableRowT,
 } from "@tanstack/react-table";
 import {
   Table,
@@ -21,6 +22,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 import type { Transaction } from "@/lib/types";
 import { normalizeCategory } from "@/lib/categories";
 
@@ -62,6 +69,10 @@ const columns: ColumnDef<Row>[] = [
         {row.original.normalized_category}
       </span>
     ),
+    filterFn: (row: TableRowT<Row>, columnId: string, value: string[]) => {
+      if (!value || value.length === 0) return true;
+      return value.includes(row.getValue(columnId) as string);
+    },
   },
   {
     accessorKey: "card_last4",
@@ -154,17 +165,78 @@ export function AllTransactionsTable({ data }: { data: Transaction[] }) {
   const searchValue =
     (table.getColumn("description")?.getFilterValue() as string) ?? "";
 
+  // All unique normalized categories that appear in the current dataset.
+  const availableCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) set.add(r.normalized_category);
+    return [...set].sort();
+  }, [rows]);
+
+  const categoryFilter =
+    (table.getColumn("normalized_category")?.getFilterValue() as string[]) ??
+    [];
+
+  function toggleCategory(cat: string) {
+    const next = categoryFilter.includes(cat)
+      ? categoryFilter.filter((c) => c !== cat)
+      : [...categoryFilter, cat];
+    table
+      .getColumn("normalized_category")
+      ?.setFilterValue(next.length > 0 ? next : undefined);
+  }
+
   return (
     <div className="space-y-3">
-      <input
-        type="text"
-        placeholder="Search merchant..."
-        value={searchValue}
-        onChange={(e) =>
-          table.getColumn("description")?.setFilterValue(e.target.value)
-        }
-        className="w-full sm:max-w-xs px-3 py-2 border rounded-md text-sm"
-      />
+      <div className="flex flex-wrap gap-2">
+        <input
+          type="text"
+          placeholder="Search merchant..."
+          value={searchValue}
+          onChange={(e) =>
+            table.getColumn("description")?.setFilterValue(e.target.value)
+          }
+          className="flex-1 min-w-[150px] sm:max-w-xs px-3 py-2 border rounded-md text-sm"
+        />
+        <Popover>
+          <PopoverTrigger className="inline-flex items-center justify-center gap-1.5 rounded-md border border-input bg-background hover:bg-muted px-3 py-2 text-sm font-medium transition-colors">
+            Category
+            {categoryFilter.length > 0 && (
+              <span className="rounded-full bg-foreground text-background text-xs px-1.5 py-0.5 font-medium">
+                {categoryFilter.length}
+              </span>
+            )}
+          </PopoverTrigger>
+          <PopoverContent className="w-56 p-2" align="start">
+            <div className="space-y-1 max-h-80 overflow-y-auto">
+              {availableCategories.map((cat) => (
+                <label
+                  key={cat}
+                  className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted cursor-pointer text-sm"
+                >
+                  <Checkbox
+                    checked={categoryFilter.includes(cat)}
+                    onCheckedChange={() => toggleCategory(cat)}
+                  />
+                  <span className="flex-1">{cat}</span>
+                </label>
+              ))}
+              {categoryFilter.length > 0 && (
+                <button
+                  type="button"
+                  className="w-full text-xs text-muted-foreground hover:text-foreground mt-1 py-1 border-t"
+                  onClick={() =>
+                    table
+                      .getColumn("normalized_category")
+                      ?.setFilterValue(undefined)
+                  }
+                >
+                  Clear ({categoryFilter.length})
+                </button>
+              )}
+            </div>
+          </PopoverContent>
+        </Popover>
+      </div>
       <div className="rounded-md border overflow-hidden">
         <Table>
           <TableHeader>
