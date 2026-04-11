@@ -68,6 +68,8 @@ var merchantOverrides = []struct {
 
 	{"איבן בייקרי", Restaurants},
 	{"ibn bakery", Restaurants},
+	{"מקדונלדס", Restaurants},
+	{"mcdonalds", Restaurants},
 
 	{"פחות מאלף", Other},
 	{"pchot", Other},
@@ -94,13 +96,13 @@ var merchantOverrides = []struct {
 // to normalized English names. Keys are compared as exact-match after trim.
 var rawCategoryMap = map[string]string{
 	// Groceries
-	"מזון ומשקאות":   Groceries,
-	"מזון וצריכה":    Groceries,
-	"מזון מהיר":      Groceries,
+	"מזון ומשקאות": Groceries,
+	"מזון וצריכה":  Groceries,
 
 	// Restaurants
-	"מסעדות":             Restaurants,
-	"מסעדות, קפה וברים":  Restaurants,
+	"מסעדות":            Restaurants,
+	"מסעדות, קפה וברים": Restaurants,
+	"מזון מהיר":         Restaurants, // fast food = restaurants, not groceries
 
 	// Transport & Fuel
 	"רכב ותחבורה":   Transport,

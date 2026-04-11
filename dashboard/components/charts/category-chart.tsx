@@ -6,22 +6,9 @@ import {
   Cell,
   Tooltip,
   ResponsiveContainer,
-  Legend,
 } from "recharts";
 import type { SumRow } from "@/lib/types";
-
-const COLORS = [
-  "hsl(220, 70%, 50%)",
-  "hsl(150, 60%, 45%)",
-  "hsl(30, 80%, 55%)",
-  "hsl(350, 65%, 50%)",
-  "hsl(260, 55%, 55%)",
-  "hsl(180, 60%, 45%)",
-  "hsl(45, 75%, 50%)",
-  "hsl(0, 60%, 50%)",
-  "hsl(200, 65%, 50%)",
-  "hsl(100, 50%, 45%)",
-];
+import { getCategoryColor } from "@/lib/categories";
 
 export function CategoryChart({ data }: { data: SumRow[] }) {
   const top = data.filter((r) => r.spent_ils > 0).slice(0, 10);
@@ -42,13 +29,11 @@ export function CategoryChart({ data }: { data: SumRow[] }) {
           labelLine={false}
           fontSize={11}
         >
-          {top.map((_, i) => (
-            <Cell key={i} fill={COLORS[i % COLORS.length]} />
+          {top.map((row) => (
+            <Cell key={row.key} fill={getCategoryColor(row.key)} />
           ))}
         </Pie>
-        <Tooltip
-          formatter={(value) => `₪${Number(value).toLocaleString()}`}
-        />
+        <Tooltip formatter={(value) => `₪${Number(value).toLocaleString()}`} />
       </PieChart>
     </ResponsiveContainer>
   );

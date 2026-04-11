@@ -23,6 +23,33 @@ export const Category = {
   Other: "Other",
 } as const;
 
+// Fixed color per category — stable across sorts, cycles, and chart types.
+// Chosen for semantic hinting: green = fresh/money, red = medical, etc.
+export const categoryColors: Record<string, string> = {
+  [Category.Groceries]: "hsl(145, 60%, 45%)", // green
+  [Category.Restaurants]: "hsl(25, 85%, 55%)", // orange
+  [Category.Transport]: "hsl(210, 70%, 50%)", // blue
+  [Category.Insurance]: "hsl(270, 50%, 55%)", // purple
+  [Category.Healthcare]: "hsl(0, 70%, 55%)", // red
+  [Category.Home]: "hsl(30, 45%, 45%)", // brown
+  [Category.Electronics]: "hsl(190, 70%, 50%)", // cyan
+  [Category.Fashion]: "hsl(325, 70%, 60%)", // pink
+  [Category.Leisure]: "hsl(50, 85%, 55%)", // yellow
+  [Category.Travel]: "hsl(175, 65%, 45%)", // teal
+  [Category.Municipality]: "hsl(220, 10%, 50%)", // gray
+  [Category.Pets]: "hsl(35, 75%, 55%)", // amber
+  [Category.Kids]: "hsl(290, 65%, 60%)", // violet
+  [Category.BooksMedia]: "hsl(235, 55%, 55%)", // indigo
+  [Category.Beauty]: "hsl(340, 70%, 65%)", // magenta
+  [Category.Finance]: "hsl(155, 50%, 35%)", // dark green
+  [Category.Work]: "hsl(215, 25%, 40%)", // slate
+  [Category.Other]: "hsl(220, 8%, 65%)", // light gray
+};
+
+export function getCategoryColor(category: string): string {
+  return categoryColors[category] || categoryColors[Category.Other];
+}
+
 // Merchant-level overrides (checked first). Case-insensitive substring match
 // on merchant description.
 const merchantOverrides: Array<{ match: string; normalized: string }> = [
@@ -60,6 +87,8 @@ const merchantOverrides: Array<{ match: string; normalized: string }> = [
 
   { match: "איבן בייקרי", normalized: Category.Restaurants },
   { match: "ibn bakery", normalized: Category.Restaurants },
+  { match: "מקדונלדס", normalized: Category.Restaurants },
+  { match: "mcdonalds", normalized: Category.Restaurants },
 
   { match: "פחות מאלף", normalized: Category.Other },
   { match: "pchot", normalized: Category.Other },
@@ -88,10 +117,10 @@ const rawCategoryMap: Record<string, string> = {
   // Groceries
   "מזון ומשקאות": Category.Groceries,
   "מזון וצריכה": Category.Groceries,
-  "מזון מהיר": Category.Groceries,
   // Restaurants
   "מסעדות": Category.Restaurants,
   "מסעדות, קפה וברים": Category.Restaurants,
+  "מזון מהיר": Category.Restaurants, // fast food = restaurants
   // Transport & Fuel
   "רכב ותחבורה": Category.Transport,
   "תחבורה ורכבים": Category.Transport,
