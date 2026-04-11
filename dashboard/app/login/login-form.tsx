@@ -21,11 +21,23 @@ export function LoginForm() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // Auto-verify magic link on mount.
+  // On mount: if already authenticated, skip to dashboard.
+  // Otherwise, auto-verify magic link if present.
   useEffect(() => {
-    if (urlPhone && urlCode) {
-      handleVerify(urlPhone, urlCode);
-    }
+    (async () => {
+      try {
+        const me = await fetch("/api/auth/me", { cache: "no-store" });
+        if (me.ok) {
+          router.push(redirect);
+          return;
+        }
+      } catch {
+        // ignore — fall through to magic link auto-verify
+      }
+      if (urlPhone && urlCode) {
+        handleVerify(urlPhone, urlCode);
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
