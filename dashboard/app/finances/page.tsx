@@ -2,9 +2,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SummaryCards } from "@/components/finances/summary-cards";
 import { TopMerchants } from "@/components/finances/top-merchants";
 import { TransactionTable } from "@/components/finances/transaction-table";
+import { CycleSelector } from "@/components/finances/cycle-selector";
 import { MonthlySpendChart } from "@/components/charts/monthly-spend";
 import { CategoryChart } from "@/components/charts/category-chart";
-import { currentCycle } from "@/lib/billing-cycle";
+import { cycleFromId, recentCycles } from "@/lib/billing-cycle";
 import {
   totals,
   sumByCategory,
@@ -15,8 +16,15 @@ import {
 
 export const dynamic = "force-dynamic";
 
-export default function FinancesPage() {
-  const cycle = currentCycle();
+interface Props {
+  searchParams: Promise<{ cycle?: string }>;
+}
+
+export default async function FinancesPage({ searchParams }: Props) {
+  const params = await searchParams;
+  const cycles = recentCycles(6);
+  const cycle = cycleFromId(params.cycle);
+
   const t = totals(cycle.since, cycle.until);
   const categories = sumByCategory(cycle.since, cycle.until);
   const merchants = sumByMerchant(cycle.since, cycle.until, 15);
@@ -25,11 +33,9 @@ export default function FinancesPage() {
 
   return (
     <div className="space-y-6">
-      <div>
+      <div className="space-y-3">
         <h1 className="text-2xl font-bold">Finances</h1>
-        <p className="text-muted-foreground text-sm">
-          Billing cycle: {cycle.since} to {cycle.until}
-        </p>
+        <CycleSelector cycles={cycles} activeId={cycle.id} />
       </div>
 
       <SummaryCards
