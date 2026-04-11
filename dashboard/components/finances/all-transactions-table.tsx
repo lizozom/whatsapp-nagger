@@ -3,8 +3,10 @@
 import { useMemo, useState } from "react";
 import {
   ColumnDef,
+  ColumnFiltersState,
   flexRender,
   getCoreRowModel,
+  getFilteredRowModel,
   getPaginationRowModel,
   getSortedRowModel,
   SortingState,
@@ -132,22 +134,37 @@ export function AllTransactionsTable({ data }: { data: Transaction[] }) {
   const [sorting, setSorting] = useState<SortingState>([
     { id: "posted_at", desc: true },
   ]);
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
 
   const table = useReactTable({
     data: rows,
     columns,
-    state: { sorting },
+    state: { sorting, columnFilters },
     onSortingChange: setSorting,
+    onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     initialState: {
       pagination: { pageSize: 25 },
     },
   });
 
+  const searchValue =
+    (table.getColumn("description")?.getFilterValue() as string) ?? "";
+
   return (
     <div className="space-y-3">
+      <input
+        type="text"
+        placeholder="Search merchant..."
+        value={searchValue}
+        onChange={(e) =>
+          table.getColumn("description")?.setFilterValue(e.target.value)
+        }
+        className="w-full sm:max-w-xs px-3 py-2 border rounded-md text-sm"
+      />
       <div className="rounded-md border overflow-hidden">
         <Table>
           <TableHeader>

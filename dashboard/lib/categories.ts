@@ -19,6 +19,7 @@ export const Category = {
   BooksMedia: "Books & Media",
   Beauty: "Beauty",
   Finance: "Finance",
+  Work: "Work",
   Other: "Other",
 } as const;
 
@@ -30,14 +31,44 @@ const merchantOverrides: Array<{ match: string; normalized: string }> = [
   { match: "hacishuq", normalized: Category.Groceries },
   { match: "משק קירשנר", normalized: Category.Groceries },
   { match: "kirshner", normalized: Category.Groceries },
+  { match: "גליקסמן", normalized: Category.Groceries },
+
   { match: "קיי אס פי", normalized: Category.Home },
   { match: "ksp", normalized: Category.Home },
+  { match: "המשרדיה", normalized: Category.Home },
+  { match: "סטוק סנטר", normalized: Category.Home },
+
   { match: "בוימן", normalized: Category.Pets },
   { match: "boyman", normalized: Category.Pets },
+  { match: "זו סנטר", normalized: Category.Pets },
+  { match: "מיץ פטל פטס", normalized: Category.Pets },
+
   { match: "סול מרכזי", normalized: Category.Kids },
+  { match: "גאחלנד", normalized: Category.Kids },
+  { match: "גיילנד", normalized: Category.Kids },
+  { match: "gayaland", normalized: Category.Kids },
+  { match: "פינת חי", normalized: Category.Kids },
+  { match: "אלמוג פנאי ומוזיקה", normalized: Category.Kids },
+  { match: "יולי אנד איב", normalized: Category.Kids },
+
   { match: "upapp", normalized: Category.Leisure },
+  { match: "audible", normalized: Category.Leisure },
+
+  { match: "איבן בייקרי", normalized: Category.Restaurants },
+  { match: "ibn bakery", normalized: Category.Restaurants },
+
   { match: "פחות מאלף", normalized: Category.Other },
   { match: "pchot", normalized: Category.Other },
+
+  { match: "vectify", normalized: Category.Work },
+  { match: "sqsp", normalized: Category.Work },
+  { match: "squarespace", normalized: Category.Work },
+  { match: "anthropic", normalized: Category.Work },
+
+  { match: "פנגו", normalized: Category.Transport },
+  { match: "pango", normalized: Category.Transport },
+
+  { match: "אמישרגז", normalized: Category.Municipality },
 ];
 
 // Provider-supplied category → normalized English category.

@@ -23,6 +23,7 @@ const (
 	BooksMedia    = "Books & Media"
 	Beauty        = "Beauty"
 	Finance       = "Finance"
+	Work          = "Work"
 	Other         = "Other"
 )
 
@@ -38,14 +39,44 @@ var merchantOverrides = []struct {
 	{"hacishuq", Groceries},
 	{"משק קירשנר", Groceries},
 	{"kirshner", Groceries},
+	{"גליקסמן", Groceries},
+
 	{"קיי אס פי", Home},
 	{"ksp", Home},
+	{"המשרדיה", Home},
+	{"סטוק סנטר", Home},
+
 	{"בוימן", Pets},
 	{"boyman", Pets},
+	{"זו סנטר", Pets},
+	{"מיץ פטל פטס", Pets},
+
 	{"סול מרכזי", Kids},
+	{"גאחלנד", Kids},
+	{"גיילנד", Kids},
+	{"gayaland", Kids},
+	{"פינת חי", Kids},
+	{"אלמוג פנאי ומוזיקה", Kids},
+	{"יולי אנד איב", Kids},
+
 	{"upapp", Leisure},
+	{"audible", Leisure},
+
+	{"איבן בייקרי", Restaurants},
+	{"ibn bakery", Restaurants},
+
 	{"פחות מאלף", Other},
 	{"pchot", Other},
+
+	{"vectify", Work},
+	{"sqsp", Work},
+	{"squarespace", Work},
+	{"anthropic", Work},
+
+	{"פנגו", Transport},
+	{"pango", Transport},
+
+	{"אמישרגז", Municipality},
 }
 
 // rawCategoryMap maps provider-supplied category strings (Cal + Max, Hebrew)
