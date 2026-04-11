@@ -427,9 +427,13 @@ func buildTxWhere(filter TxFilter) (string, []any) {
 		}
 		where = append(where, "("+strings.Join(parts, " OR ")+")")
 	}
-	if len(where) == 0 {
-		return "", args
-	}
+
+	// Always exclude zero-amount transactions. These are pre-auth holds that
+	// Cal/Max create when a card is swiped; the real amount arrives later as
+	// a separate posted row. A ₪0 transaction has no meaningful impact on any
+	// sum, so filtering them here is safe across all query callers.
+	where = append(where, "amount_ils != 0")
+
 	return "WHERE " + strings.Join(where, " AND "), args
 }
 

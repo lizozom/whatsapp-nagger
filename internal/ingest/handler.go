@@ -77,12 +77,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stamp provider on each tx (trusting the envelope over per-row fields).
-	for i := range req.Transactions {
-		if req.Transactions[i].Provider == "" {
-			req.Transactions[i].Provider = req.Provider
+	// Stamp provider on each tx (trusting the envelope over per-row fields)
+	// and drop zero-amount rows (pre-auth holds from Cal/Max that accumulate
+	// as ghost records — see hash semantics in db/transactions.go).
+	filtered := req.Transactions[:0]
+	for _, tx := range req.Transactions {
+		if tx.AmountILS == 0 {
+			continue
 		}
+		if tx.Provider == "" {
+			tx.Provider = req.Provider
+		}
+		filtered = append(filtered, tx)
 	}
+	req.Transactions = filtered
 
 	runID, err := h.Store.StartRun(req.Provider)
 	if err != nil {

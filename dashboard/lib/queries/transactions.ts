@@ -147,7 +147,9 @@ export function topTransactions(
     .all(since, until, limit) as Transaction[];
 }
 
-/** All transactions in a cycle. Used by the paginated table on the dashboard. */
+/** All transactions in a cycle. Used by the paginated table on the dashboard.
+ *  Excludes zero-amount pre-auth holds (transient pending rows Cal/Max creates
+ *  when a card is swiped, later replaced by the real posted amount). */
 export function allTransactionsInCycle(
   since: string,
   until: string,
@@ -157,6 +159,7 @@ export function allTransactionsInCycle(
       `SELECT id, provider, card_last4, posted_at, amount_ils, description, memo, category, status
        FROM transactions
        WHERE posted_at >= ? AND posted_at <= ?
+         AND amount_ils != 0
        ORDER BY posted_at DESC, id ASC`,
     )
     .all(since, until) as Transaction[];
