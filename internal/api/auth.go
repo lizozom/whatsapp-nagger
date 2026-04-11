@@ -20,10 +20,29 @@ type OTPSender interface {
 
 // AuthHandler holds dependencies for the OTP auth endpoints.
 type AuthHandler struct {
-	OTP       *OTPStore
-	DM        OTPSender      // nil in terminal mode — OTP disabled
-	Allowlist map[string]string // phone → name (from personas)
-	JWTSecret []byte
+	OTP          *OTPStore
+	DM           OTPSender         // nil in terminal mode — OTP disabled
+	Allowlist    map[string]string // phone → name (from personas)
+	JWTSecret    []byte
+	DashboardURL string // e.g. "https://whatsapp-nagger.fly.dev"
+}
+
+// GenerateMagicLink creates a one-tap login URL for the given phone by
+// generating an OTP server-side and embedding it in the URL query string.
+// Implements agent.DashboardLinker.
+func (ah *AuthHandler) GenerateMagicLink(phone string) (string, error) {
+	if _, ok := ah.Allowlist[phone]; !ok {
+		return "", fmt.Errorf("phone not in allowlist")
+	}
+	code, err := ah.OTP.Generate(phone)
+	if err != nil {
+		return "", err
+	}
+	base := ah.DashboardURL
+	if base == "" {
+		base = "https://whatsapp-nagger.fly.dev"
+	}
+	return fmt.Sprintf("%s/login?phone=%s&code=%s", base, phone, code), nil
 }
 
 // RegisterAuthRoutes mounts POST /api/auth/otp and POST /api/auth/verify.

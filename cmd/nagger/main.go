@@ -80,12 +80,14 @@ func main() {
 	if jwtSecret := os.Getenv("JWT_SECRET"); jwtSecret != "" {
 		allowlist := api.BuildAllowlist(api.LoadPersonasFile())
 		auth := &api.AuthHandler{
-			OTP:       api.NewOTPStore(5 * time.Minute),
-			DM:        otpSender,
-			Allowlist: allowlist,
-			JWTSecret: []byte(jwtSecret),
+			OTP:          api.NewOTPStore(5 * time.Minute),
+			DM:           otpSender,
+			Allowlist:    allowlist,
+			JWTSecret:    []byte(jwtSecret),
+			DashboardURL: os.Getenv("DASHBOARD_URL"),
 		}
 		auth.RegisterAuthRoutes(mux)
+		a.SetDashboardLinker(auth)
 		fmt.Fprintf(os.Stderr, "Dashboard auth enabled (%d allowed phones).\n", len(allowlist))
 	}
 

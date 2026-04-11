@@ -33,6 +33,7 @@ Tool-use rules (follow objectively — no personality here):
 - If someone says a task is done, use update_task to mark it done.
 - If asked about tasks, use list_tasks to check.
 - If someone explicitly asks for a digest or daily summary, use list_tasks with status "pending", then format the result as a digest (see digest format below).
+- If asked for "the dashboard", "the link", "dashboard link", etc., use dashboard_link with for_user = the sender's name (from the [Sender] prefix). Then reply with the returned URL as a clickable link — the link auto-authenticates so the user just taps it. Keep the reply to one line.
 - If asked about expenses, spending, money, or a specific merchant/category, use expenses_summary (aggregations) or list_transactions (specific charges).
   - IMPORTANT: For "how much did we spend" / totals / summaries, ALWAYS use expenses_summary (it runs a single SQL aggregation with no row limit). NEVER use list_transactions for totals — it has a row limit and will undercount. list_transactions is ONLY for "show me the individual charges".
   - Omitting since/until uses the CURRENT BILLING CYCLE, which runs from the BILLING_DAY of one month (default 10) through the day before BILLING_DAY of the next, inclusive. "This month's spending" and "current cycle" are the same thing — do NOT default to calendar months.
@@ -179,12 +180,19 @@ func parsePersonaPhones(personas string) map[string]string {
 	return phones
 }
 
+// DashboardLinker generates a pre-authenticated dashboard login URL for a phone.
+// Implemented by the api.AuthHandler (which holds the OTP store).
+type DashboardLinker interface {
+	GenerateMagicLink(phone string) (string, error)
+}
+
 type Agent struct {
-	client  anthropic.Client
-	store   *db.TaskStore
-	txStore *db.TxStore // optional: enables expense tools when non-nil
-	history []anthropic.MessageParam
-	tools   []anthropic.ToolUnionParam
+	client   anthropic.Client
+	store    *db.TaskStore
+	txStore  *db.TxStore     // optional: enables expense tools when non-nil
+	linker   DashboardLinker // optional: enables dashboard_link tool when non-nil
+	history  []anthropic.MessageParam
+	tools    []anthropic.ToolUnionParam
 }
 
 // NewAgent constructs an agent with task and (optional) transaction stores.
@@ -301,6 +309,24 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 				},
 			},
 		}},
+		{OfTool: &anthropic.ToolParam{
+			Name: "dashboard_link",
+			Description: anthropic.String(
+				"Generate a one-tap magic link to the web dashboard for the requesting user. " +
+					"The link includes a pre-generated OTP code so the user doesn't have to enter it. " +
+					"Use this when someone asks for 'the dashboard', 'the link', 'give me the dashboard', etc. " +
+					"The phone is resolved from the [Sender] prefix of the current message via personas.md.",
+			),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"for_user": map[string]any{
+						"type":        "string",
+						"description": "Family member name (must match personas.md). Usually the requesting user.",
+					},
+				},
+				Required: []string{"for_user"},
+			},
+		}},
 	}
 
 	return &Agent{
@@ -309,6 +335,12 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 		txStore: txStore,
 		tools:   tools,
 	}
+}
+
+// SetDashboardLinker enables the dashboard_link tool.
+// Call after NewAgent but before HandleMessage starts running.
+func (a *Agent) SetDashboardLinker(linker DashboardLinker) {
+	a.linker = linker
 }
 
 // maxHistoryMessages bounds the conversation window sent to Claude. Older
@@ -602,6 +634,39 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			txs[i].RawJSON = ""
 		}
 		b, _ := json.Marshal(txs)
+		return string(b), nil
+
+	case "dashboard_link":
+		if a.linker == nil {
+			return "", fmt.Errorf("dashboard link not configured on this deployment")
+		}
+		var input struct {
+			ForUser string `json:"for_user"`
+		}
+		if err := json.Unmarshal(inputJSON, &input); err != nil {
+			return "", fmt.Errorf("parse input: %w", err)
+		}
+		if input.ForUser == "" {
+			return "", fmt.Errorf("for_user is required")
+		}
+
+		// Resolve name → phone via personas.
+		phones := parsePersonaPhones(loadPersonas())
+		phone, ok := phones[input.ForUser]
+		if !ok {
+			return "", fmt.Errorf("unknown user %q — personas.md has: %s",
+				input.ForUser, strings.Join(sortedKeys(phones), ", "))
+		}
+
+		url, err := a.linker.GenerateMagicLink(phone)
+		if err != nil {
+			return "", fmt.Errorf("generate link: %w", err)
+		}
+		b, _ := json.Marshal(map[string]any{
+			"url":        url,
+			"expires_in": 300,
+			"user":       input.ForUser,
+		})
 		return string(b), nil
 
 	default:
