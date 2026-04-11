@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SummaryCards } from "@/components/finances/summary-cards";
 import { TopMerchants } from "@/components/finances/top-merchants";
 import { TransactionTable } from "@/components/finances/transaction-table";
+import { AllTransactionsTable } from "@/components/finances/all-transactions-table";
 import { CycleSelector } from "@/components/finances/cycle-selector";
 import { MonthlySpendChart } from "@/components/charts/monthly-spend";
 import { CategoryChart } from "@/components/charts/category-chart";
@@ -12,6 +13,7 @@ import {
   sumByMerchant,
   monthlySpend,
   topTransactions,
+  allTransactionsInCycle,
 } from "@/lib/queries/transactions";
 
 export const dynamic = "force-dynamic";
@@ -30,6 +32,7 @@ export default async function FinancesPage({ searchParams }: Props) {
   const merchants = sumByMerchant(cycle.since, cycle.until, 15);
   const monthly = monthlySpend(8);
   const topTx = topTransactions(cycle.since, cycle.until, 20);
+  const allTx = allTransactionsInCycle(cycle.since, cycle.until);
 
   return (
     <div className="space-y-6">
@@ -86,6 +89,15 @@ export default async function FinancesPage({ searchParams }: Props) {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>All Transactions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <AllTransactionsTable data={allTx} />
+        </CardContent>
+      </Card>
     </div>
   );
 }

@@ -146,3 +146,18 @@ export function topTransactions(
     )
     .all(since, until, limit) as Transaction[];
 }
+
+/** All transactions in a cycle. Used by the paginated table on the dashboard. */
+export function allTransactionsInCycle(
+  since: string,
+  until: string,
+): Transaction[] {
+  return getDb()
+    .prepare(
+      `SELECT id, provider, card_last4, posted_at, amount_ils, description, memo, category, status
+       FROM transactions
+       WHERE posted_at >= ? AND posted_at <= ?
+       ORDER BY posted_at DESC, id ASC`,
+    )
+    .all(since, until) as Transaction[];
+}
