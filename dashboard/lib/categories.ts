@@ -42,6 +42,7 @@ const merchantOverrides: Array<{ match: string; normalized: string }> = [
   { match: "boyman", normalized: Category.Pets },
   { match: "זו סנטר", normalized: Category.Pets },
   { match: "מיץ פטל פטס", normalized: Category.Pets },
+  { match: "יובל סמואל", normalized: Category.Pets },
 
   { match: "סול מרכזי", normalized: Category.Kids },
   { match: "גאחלנד", normalized: Category.Kids },
@@ -50,6 +51,9 @@ const merchantOverrides: Array<{ match: string; normalized: string }> = [
   { match: "פינת חי", normalized: Category.Kids },
   { match: "אלמוג פנאי ומוזיקה", normalized: Category.Kids },
   { match: "יולי אנד איב", normalized: Category.Kids },
+  { match: "הפיראט האדום", normalized: Category.Kids },
+  { match: "טויס", normalized: Category.Kids },
+  { match: "toys", normalized: Category.Kids },
 
   { match: "upapp", normalized: Category.Leisure },
   { match: "audible", normalized: Category.Leisure },
@@ -59,6 +63,8 @@ const merchantOverrides: Array<{ match: string; normalized: string }> = [
 
   { match: "פחות מאלף", normalized: Category.Other },
   { match: "pchot", normalized: Category.Other },
+  { match: "רד בוקס", normalized: Category.Other },
+  { match: "red box", normalized: Category.Other },
 
   { match: "vectify", normalized: Category.Work },
   { match: "sqsp", normalized: Category.Work },
@@ -67,8 +73,13 @@ const merchantOverrides: Array<{ match: string; normalized: string }> = [
 
   { match: "פנגו", normalized: Category.Transport },
   { match: "pango", normalized: Category.Transport },
+  { match: "חניון", normalized: Category.Transport },
 
   { match: "אמישרגז", normalized: Category.Municipality },
+  { match: "חברת החשמל", normalized: Category.Municipality },
+
+  { match: "ארנק מט", normalized: Category.Finance },
+  { match: "מכירת מט", normalized: Category.Finance },
 ];
 
 // Provider-supplied category → normalized English category.
@@ -122,9 +133,11 @@ const rawCategoryMap: Record<string, string> = {
   "קוסמטיקה וטיפוח": Category.Beauty,
   // Finance
   "פיננסים": Category.Finance,
-  "ציוד ומשרד": Category.Finance,
   "העברת כספים": Category.Finance,
   "משיכת מזומן": Category.Finance,
+
+  // Office/equipment — rare, falls through to Other.
+  "ציוד ומשרד": Category.Other,
 };
 
 /**

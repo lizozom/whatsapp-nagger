@@ -50,6 +50,7 @@ var merchantOverrides = []struct {
 	{"boyman", Pets},
 	{"זו סנטר", Pets},
 	{"מיץ פטל פטס", Pets},
+	{"יובל סמואל", Pets},
 
 	{"סול מרכזי", Kids},
 	{"גאחלנד", Kids},
@@ -58,6 +59,9 @@ var merchantOverrides = []struct {
 	{"פינת חי", Kids},
 	{"אלמוג פנאי ומוזיקה", Kids},
 	{"יולי אנד איב", Kids},
+	{"הפיראט האדום", Kids},
+	{"טויס", Kids},
+	{"toys", Kids},
 
 	{"upapp", Leisure},
 	{"audible", Leisure},
@@ -67,6 +71,8 @@ var merchantOverrides = []struct {
 
 	{"פחות מאלף", Other},
 	{"pchot", Other},
+	{"רד בוקס", Other},
+	{"red box", Other},
 
 	{"vectify", Work},
 	{"sqsp", Work},
@@ -75,8 +81,13 @@ var merchantOverrides = []struct {
 
 	{"פנגו", Transport},
 	{"pango", Transport},
+	{"חניון", Transport},
 
 	{"אמישרגז", Municipality},
+	{"חברת החשמל", Municipality},
+
+	{"ארנק מט", Finance},
+	{"מכירת מט", Finance},
 }
 
 // rawCategoryMap maps provider-supplied category strings (Cal + Max, Hebrew)
@@ -144,10 +155,12 @@ var rawCategoryMap = map[string]string{
 	"קוסמטיקה וטיפוח": Beauty,
 
 	// Finance
-	"פיננסים":       Finance,
-	"ציוד ומשרד":    Finance,
-	"העברת כספים":   Finance,
-	"משיכת מזומן":   Finance,
+	"פיננסים":     Finance,
+	"העברת כספים": Finance,
+	"משיכת מזומן": Finance,
+
+	// Office/equipment — falls through to Other (rare in this dataset).
+	"ציוד ומשרד": Other,
 }
 
 // Normalize returns the canonical English category for a given merchant +
