@@ -56,19 +56,47 @@ export function sumByMerchant(
   until: string,
   limit = 15,
 ): SumRow[] {
-  return getDb()
+  // Fetch raw rows so we can attach the normalized category per merchant.
+  const fullRows = getDb()
     .prepare(
-      `SELECT description AS key,
-              COUNT(*) AS tx_count,
-              ROUND(-SUM(amount_ils), 2) AS spent_ils,
-              ROUND(SUM(CASE WHEN amount_ils < 0 THEN -amount_ils ELSE 0 END), 2) AS charges_ils,
-              ROUND(SUM(CASE WHEN amount_ils > 0 THEN amount_ils ELSE 0 END), 2) AS refunds_ils
+      `SELECT description, COALESCE(category, '') AS category, amount_ils
        FROM transactions
-       WHERE posted_at >= ? AND posted_at <= ?
-       GROUP BY description ORDER BY spent_ils DESC
-       LIMIT ?`,
+       WHERE posted_at >= ? AND posted_at <= ?`,
     )
-    .all(since, until, limit) as SumRow[];
+    .all(since, until) as Array<{
+    description: string;
+    category: string;
+    amount_ils: number;
+  }>;
+
+  const byMerchant: Record<string, SumRow> = {};
+  for (const r of fullRows) {
+    if (!byMerchant[r.description]) {
+      byMerchant[r.description] = {
+        key: r.description,
+        tx_count: 0,
+        spent_ils: 0,
+        charges_ils: 0,
+        refunds_ils: 0,
+        category: normalizeCategory(r.description, r.category),
+      };
+    }
+    const b = byMerchant[r.description];
+    b.tx_count++;
+    b.spent_ils += -r.amount_ils;
+    if (r.amount_ils < 0) b.charges_ils += -r.amount_ils;
+    if (r.amount_ils > 0) b.refunds_ils += r.amount_ils;
+  }
+
+  return Object.values(byMerchant)
+    .map((r) => ({
+      ...r,
+      spent_ils: Math.round(r.spent_ils * 100) / 100,
+      charges_ils: Math.round(r.charges_ils * 100) / 100,
+      refunds_ils: Math.round(r.refunds_ils * 100) / 100,
+    }))
+    .sort((a, b) => b.spent_ils - a.spent_ils)
+    .slice(0, limit);
 }
 
 export function monthlySpend(months = 6): MonthlySpend[] {

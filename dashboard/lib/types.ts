@@ -26,6 +26,7 @@ export interface SumRow {
   spent_ils: number;
   charges_ils: number;
   refunds_ils: number;
+  category?: string; // normalized category (only populated for merchant groupings)
 }
 
 export interface MonthlySpend {

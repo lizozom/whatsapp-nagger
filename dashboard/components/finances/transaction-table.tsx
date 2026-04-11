@@ -1,4 +1,5 @@
 import type { Transaction } from "@/lib/types";
+import { normalizeCategory } from "@/lib/categories";
 
 export function TransactionTable({ data }: { data: Transaction[] }) {
   return (
@@ -21,8 +22,8 @@ export function TransactionTable({ data }: { data: Transaction[] }) {
               <td className="py-1.5 pr-2 truncate max-w-[200px]" title={tx.description}>
                 {tx.description}
               </td>
-              <td className="py-1.5 pr-2 text-muted-foreground truncate max-w-[120px]">
-                {tx.category || "—"}
+              <td className="py-1.5 pr-2 text-muted-foreground truncate max-w-[140px]">
+                {normalizeCategory(tx.description, tx.category)}
               </td>
               <td className="py-1.5 text-right font-mono whitespace-nowrap">
                 ₪{Math.abs(tx.amount_ils).toLocaleString(undefined, {
