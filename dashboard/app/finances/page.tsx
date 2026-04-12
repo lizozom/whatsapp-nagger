@@ -11,7 +11,7 @@ import {
   totals,
   sumByCategory,
   sumByMerchant,
-  monthlySpend,
+  cycleSpendByCategory,
   topTransactions,
   allTransactionsInCycle,
 } from "@/lib/queries/transactions";
@@ -30,7 +30,7 @@ export default async function FinancesPage({ searchParams }: Props) {
   const t = totals(cycle.since, cycle.until);
   const categories = sumByCategory(cycle.since, cycle.until);
   const merchants = sumByMerchant(cycle.since, cycle.until, 15);
-  const monthly = monthlySpend(8);
+  const cycleSpend = cycleSpendByCategory(12);
   const topTx = topTransactions(cycle.since, cycle.until, 20);
   const allTx = allTransactionsInCycle(cycle.since, cycle.until);
 
@@ -51,12 +51,12 @@ export default async function FinancesPage({ searchParams }: Props) {
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
+        <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle>Monthly Spend</CardTitle>
+            <CardTitle>Spend by Billing Cycle</CardTitle>
           </CardHeader>
           <CardContent>
-            <MonthlySpendChart data={monthly} />
+            <MonthlySpendChart data={cycleSpend} />
           </CardContent>
         </Card>
 

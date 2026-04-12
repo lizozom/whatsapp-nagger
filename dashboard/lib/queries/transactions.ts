@@ -106,11 +106,57 @@ export function monthlySpend(months = 6): MonthlySpend[] {
               ROUND(-SUM(amount_ils), 2) AS spent,
               COUNT(*) AS tx_count
        FROM transactions
+       WHERE amount_ils != 0
        GROUP BY month
        ORDER BY month DESC
        LIMIT ?`,
     )
     .all(months) as MonthlySpend[];
+}
+
+export interface CycleSpendRow {
+  cycle: string; // label like "Apr 10 – May 9"
+  since: string;
+  until: string;
+  [category: string]: string | number; // dynamic category keys → spend amounts
+}
+
+/** Spend by billing cycle, broken down by normalized category.
+ *  Returns one row per cycle with a key per category = spent amount. */
+export function cycleSpendByCategory(cycleCount = 12): CycleSpendRow[] {
+  const { recentCycles } = require("../billing-cycle") as typeof import("../billing-cycle");
+  const cycles = recentCycles(cycleCount);
+
+  const rows: CycleSpendRow[] = [];
+  for (const cycle of cycles) {
+    const txs = getDb()
+      .prepare(
+        `SELECT description, COALESCE(category, '') AS category, amount_ils
+         FROM transactions
+         WHERE posted_at >= ? AND posted_at <= ? AND amount_ils != 0`,
+      )
+      .all(cycle.since, cycle.until) as Array<{
+      description: string;
+      category: string;
+      amount_ils: number;
+    }>;
+
+    const row: CycleSpendRow = {
+      cycle: cycle.label,
+      since: cycle.since,
+      until: cycle.until,
+    };
+
+    for (const tx of txs) {
+      const cat = normalizeCategory(tx.description, tx.category);
+      const current = (row[cat] as number) || 0;
+      row[cat] = Math.round((current + -tx.amount_ils) * 100) / 100;
+    }
+
+    rows.push(row);
+  }
+
+  return rows.reverse(); // oldest first for chart
 }
 
 export function totals(since: string, until: string) {
