@@ -51,7 +51,7 @@ export default async function FinancesPage({ searchParams }: Props) {
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card className="lg:col-span-2">
+        <Card>
           <CardHeader>
             <CardTitle>Spend by Billing Cycle</CardTitle>
           </CardHeader>

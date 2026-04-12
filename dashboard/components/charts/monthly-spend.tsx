@@ -80,12 +80,14 @@ export function MonthlySpendChart({ data }: { data: CycleSpendRow[] }) {
       <BarChart data={data}>
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis
-          dataKey="cycle"
-          fontSize={10}
+          dataKey="until"
+          fontSize={11}
           interval={0}
-          angle={-35}
-          textAnchor="end"
-          height={60}
+          tickFormatter={(v) => {
+            const d = new Date(v);
+            const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+            return `${months[d.getMonth()]} ${d.getDate()}`;
+          }}
         />
         <YAxis
           fontSize={12}
