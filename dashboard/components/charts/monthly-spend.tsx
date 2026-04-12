@@ -13,7 +13,6 @@ import {
 import type { CycleSpendRow } from "@/lib/queries/transactions";
 import { categoryColors, Category } from "@/lib/categories";
 
-// Fixed order for stacking — most common first so they're at the bottom.
 const CATEGORY_ORDER = [
   Category.Groceries,
   Category.Restaurants,
@@ -35,14 +34,49 @@ const CATEGORY_ORDER = [
   Category.Other,
 ];
 
+function CustomTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+
+  const items = payload
+    .filter((p: any) => p.value > 0)
+    .sort((a: any, b: any) => b.value - a.value);
+
+  const total = items.reduce((s: number, p: any) => s + p.value, 0);
+
+  return (
+    <div className="bg-background border rounded-lg shadow-lg p-3 text-xs max-w-[220px]">
+      <div className="font-medium mb-2 text-sm">{label}</div>
+      <div className="space-y-1 max-h-[200px] overflow-y-auto">
+        {items.map((item: any) => (
+          <div key={item.name} className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span
+                className="w-2.5 h-2.5 rounded-sm shrink-0"
+                style={{ backgroundColor: item.color }}
+              />
+              <span className="truncate text-muted-foreground">{item.name}</span>
+            </div>
+            <span className="tabular-nums font-medium shrink-0">
+              ₪{Math.round(item.value).toLocaleString()}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="border-t mt-2 pt-2 flex justify-between font-medium text-sm">
+        <span>Total</span>
+        <span className="tabular-nums">₪{Math.round(total).toLocaleString()}</span>
+      </div>
+    </div>
+  );
+}
+
 export function MonthlySpendChart({ data }: { data: CycleSpendRow[] }) {
-  // Find which categories actually have data across all cycles.
   const activeCategories = CATEGORY_ORDER.filter((cat) =>
     data.some((row) => (row[cat] as number) > 0),
   );
 
   return (
-    <ResponsiveContainer width="100%" height={350}>
+    <ResponsiveContainer width="100%" height={400}>
       <BarChart data={data}>
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis
@@ -57,15 +91,9 @@ export function MonthlySpendChart({ data }: { data: CycleSpendRow[] }) {
           fontSize={12}
           tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
         />
-        <Tooltip
-          formatter={(value, name) => [
-            `₪${Math.round(Number(value)).toLocaleString()}`,
-            String(name),
-          ]}
-          labelFormatter={(label) => `Cycle: ${label}`}
-        />
+        <Tooltip content={<CustomTooltip />} />
         <Legend
-          wrapperStyle={{ fontSize: 10 }}
+          wrapperStyle={{ fontSize: 10, paddingTop: 8 }}
           iconSize={8}
         />
         {activeCategories.map((cat) => (
