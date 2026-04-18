@@ -226,7 +226,7 @@ func (wa *WhatsApp) Write(text string) error {
 		return fmt.Errorf("not paired yet — scan QR code first")
 	}
 	_, err := wa.client.SendMessage(context.Background(), wa.groupJID, &waE2E.Message{
-		Conversation: proto.String(text),
+		Conversation: proto.String("🤖 " + text),
 	})
 	return err
 }
@@ -300,7 +300,7 @@ func (wa *WhatsApp) WriteWithMentions(text string, mentions []Mention) error {
 
 	_, err := wa.client.SendMessage(context.Background(), wa.groupJID, &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-			Text: proto.String(text),
+			Text: proto.String("🤖 " + text),
 			ContextInfo: &waE2E.ContextInfo{
 				MentionedJID: jids,
 			},
