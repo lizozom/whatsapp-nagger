@@ -47,8 +47,9 @@ func main() {
 	})
 
 	// Ingest endpoint (opt-in via INGEST_SECRET).
-	if secret := os.Getenv("INGEST_SECRET"); secret != "" {
-		mux.Handle("/ingest/transactions", ingest.NewHandler(txStore, secret))
+	ingestSecret := os.Getenv("INGEST_SECRET")
+	if ingestSecret != "" {
+		mux.Handle("/ingest/transactions", ingest.NewHandler(txStore, ingestSecret))
 	}
 
 	// Messenger setup.
@@ -74,6 +75,14 @@ func main() {
 		term := messenger.NewTerminal()
 		term.Write("Online. Type [Name]: message to start. Ctrl+C to quit.")
 		m = term
+	}
+
+	// Notify endpoint — scraper alerts forwarded to group chat (same HMAC secret).
+	if ingestSecret != "" {
+		mux.Handle("/notify", &ingest.NotifyHandler{
+			Secret: ingestSecret,
+			Write:  m.Write,
+		})
 	}
 
 	// Dashboard auth (WhatsApp OTP → JWT).

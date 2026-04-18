@@ -36,7 +36,14 @@ run_provider() {
   return 1
 }
 
-run_provider max || true
-run_provider cal || true
+FAILURES=""
+
+run_provider max || FAILURES="$FAILURES max"
+run_provider cal || FAILURES="$FAILURES cal"
+
+if [ -n "$FAILURES" ]; then
+  MSG="Sync failed for:$FAILURES ($(date +%Y-%m-%d)). Check logs."
+  npx tsx src/notify.ts "$MSG" >> "$LOG" 2>&1 || echo "[notify] could not send alert" >> "$LOG"
+fi
 
 echo "=== done $(date) ===" >> "$LOG"
