@@ -352,7 +352,7 @@ func TestParsePersonaPhones(t *testing.T) {
 ## Millie
 - **Role:** Child
 `
-	phones := parsePersonaPhones(personas)
+	phones := ParsePersonaPhones(personas)
 
 	if phones["Alice"] != "972501234567" {
 		t.Errorf("Alice phone: got %q, want 972501234567", phones["Alice"])
@@ -366,7 +366,7 @@ func TestParsePersonaPhones(t *testing.T) {
 }
 
 func TestParsePersonaPhonesEmpty(t *testing.T) {
-	phones := parsePersonaPhones("")
+	phones := ParsePersonaPhones("")
 	if len(phones) != 0 {
 		t.Errorf("expected empty map, got %v", phones)
 	}
@@ -376,7 +376,7 @@ func TestParsePersonaPhonesNoPhoneField(t *testing.T) {
 	personas := `## Alice
 - **Role:** Parent
 `
-	phones := parsePersonaPhones(personas)
+	phones := ParsePersonaPhones(personas)
 	if len(phones) != 0 {
 		t.Errorf("expected empty map, got %v", phones)
 	}

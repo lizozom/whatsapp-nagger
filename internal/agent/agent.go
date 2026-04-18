@@ -75,7 +75,7 @@ func buildSystemPrompt() string {
 	loc, _ := time.LoadLocation(tz)
 	now := time.Now().In(loc)
 
-	members := loadPersonas()
+	members := LoadPersonas()
 	merchantCtx := os.Getenv("MERCHANT_CONTEXT")
 	if merchantCtx == "" {
 		merchantCtx = "(none configured)"
@@ -92,7 +92,7 @@ func buildSystemPrompt() string {
 	)
 }
 
-func loadPersonas() string {
+func LoadPersonas() string {
 	// Try personas file first, fall back to env var
 	path := os.Getenv("PERSONAS_FILE")
 	if path == "" {
@@ -158,9 +158,9 @@ func loadCardOwners() map[string][]db.CardRef {
 	return parseCardOwners(os.Getenv("CARD_OWNERS"))
 }
 
-// parsePersonaPhones extracts name->phone mappings from personas markdown.
+// ParsePersonaPhones extracts name->phone mappings from personas markdown.
 // Expects "## Name" headers followed by "- **Phone:** 972..." lines.
-func parsePersonaPhones(personas string) map[string]string {
+func ParsePersonaPhones(personas string) map[string]string {
 	phones := make(map[string]string)
 	nameRe := regexp.MustCompile(`(?m)^## (.+)`)
 	phoneRe := regexp.MustCompile(`(?i)\*\*Phone:\*\*\s*(\d+)`)
@@ -410,7 +410,7 @@ func resolveMentionsWithPhones(text string, phones map[string]string) (string, [
 // ResolveMentions scans text for @Name patterns, matches them against persona
 // phone numbers, and returns the modified text (with @phone) and mention list.
 func ResolveMentions(text string) (string, []messenger.Mention) {
-	return resolveMentionsWithPhones(text, parsePersonaPhones(loadPersonas()))
+	return resolveMentionsWithPhones(text, ParsePersonaPhones(LoadPersonas()))
 }
 
 func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
@@ -651,7 +651,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		}
 
 		// Resolve name → phone via personas.
-		phones := parsePersonaPhones(loadPersonas())
+		phones := ParsePersonaPhones(LoadPersonas())
 		phone, ok := phones[input.ForUser]
 		if !ok {
 			return "", fmt.Errorf("unknown user %q — personas.md has: %s",

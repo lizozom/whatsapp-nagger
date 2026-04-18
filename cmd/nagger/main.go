@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -117,6 +118,17 @@ func main() {
 		go startDigestScheduler(digestHour, a, m, store)
 	}
 
+	// Nag DM scheduler — sends private reminders to people with too many overdue tasks.
+	if nagHour := os.Getenv("NAG_HOUR"); nagHour != "" {
+		if wa, ok := m.(*messenger.WhatsApp); ok {
+			threshold := 4
+			if v, err := strconv.Atoi(os.Getenv("NAG_THRESHOLD")); err == nil && v > 0 {
+				threshold = v
+			}
+			go startNagScheduler(nagHour, threshold, wa, store)
+		}
+	}
+
 	for {
 		msg, err := m.Read()
 		if err != nil {
@@ -142,6 +154,57 @@ func sendWithMentions(m messenger.IMessenger, text string) error {
 		return m.WriteWithMentions(resolved, mentions)
 	}
 	return m.Write(text)
+}
+
+func startNagScheduler(nagHour string, threshold int, wa *messenger.WhatsApp, store *db.TaskStore) {
+	loc, _ := time.LoadLocation("Asia/Jerusalem")
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	phones := agent.ParsePersonaPhones(agent.LoadPersonas())
+	fmt.Fprintf(os.Stderr, "Nag scheduler enabled at %s (threshold: %d overdue tasks).\n", nagHour, threshold)
+
+	for range ticker.C {
+		now := time.Now().In(loc)
+		currentTime := now.Format("15:04")
+		today := now.Format("2006-01-02")
+
+		if currentTime != nagHour {
+			continue
+		}
+
+		lastDate, _ := store.GetMeta("last_nag_date")
+		if lastDate == today {
+			continue
+		}
+
+		counts, err := store.CountOverdueByAssignee(today)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Nag: overdue query error: %v\n", err)
+			continue
+		}
+
+		nagged := 0
+		for assignee, count := range counts {
+			if count < threshold {
+				continue
+			}
+			phone, ok := phones[assignee]
+			if !ok || phone == "" {
+				continue
+			}
+			msg := fmt.Sprintf("You have %d overdue tasks. That's not a flex. Open the group and sort it out before I start nagging in public.", count)
+			if err := wa.SendDM(phone, msg); err != nil {
+				fmt.Fprintf(os.Stderr, "Nag: failed to DM %s: %v\n", assignee, err)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "Nag: sent DM to %s (%d overdue).\n", assignee, count)
+			nagged++
+		}
+
+		store.SetMeta("last_nag_date", today)
+		fmt.Fprintf(os.Stderr, "Nag: done for %s, nagged %d people.\n", today, nagged)
+	}
 }
 
 func startDigestScheduler(digestHour string, a *agent.Agent, m messenger.IMessenger, store *db.TaskStore) {

@@ -139,6 +139,30 @@ func (s *TaskStore) DeleteTask(id int64) error {
 	return nil
 }
 
+// CountOverdueByAssignee returns the number of pending tasks with a due date
+// strictly before `before` (YYYY-MM-DD), grouped by assignee.
+func (s *TaskStore) CountOverdueByAssignee(before string) (map[string]int, error) {
+	rows, err := s.db.Query(
+		`SELECT assignee, COUNT(*) FROM tasks
+		 WHERE status = 'pending' AND due_date != '' AND due_date < ?
+		 GROUP BY assignee`, before)
+	if err != nil {
+		return nil, fmt.Errorf("count overdue: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var assignee string
+		var count int
+		if err := rows.Scan(&assignee, &count); err != nil {
+			return nil, fmt.Errorf("scan overdue row: %w", err)
+		}
+		counts[assignee] = count
+	}
+	return counts, rows.Err()
+}
+
 func (s *TaskStore) Close() error {
 	return s.db.Close()
 }
