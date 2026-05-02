@@ -16,8 +16,20 @@ type Migration struct {
 	Up   func(tx *sql.Tx) error
 }
 
-// migrations is the production registry. Stories 1.3+ append entries.
-var migrations []Migration
+// migrations is the production registry. Append new entries at the end.
+// Each migrate_NNN_description function lives in its own file.
+var migrations = []Migration{
+	{ID: 1, Name: "groups", Up: migrate001Groups},
+}
+
+func firstLine(s string) string {
+	for i, c := range s {
+		if c == '\n' {
+			return s[:i]
+		}
+	}
+	return s
+}
 
 // RunMigrations applies the production registry. Call once at process start
 // after the base stores have created their CREATE TABLE IF NOT EXISTS schema
