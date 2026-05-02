@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -35,6 +37,18 @@ func main() {
 		os.Exit(1)
 	}
 	defer txStore.Close()
+
+	migrationDB, err := sql.Open("sqlite", tasksDBPath)
+	if err != nil {
+		slog.Error("open db for migrations", "error", err)
+		os.Exit(1)
+	}
+	if err := db.RunMigrations(migrationDB); err != nil {
+		slog.Error("run migrations", "error", err)
+		migrationDB.Close()
+		os.Exit(1)
+	}
+	migrationDB.Close()
 
 	a := agent.NewAgent(store, txStore)
 
