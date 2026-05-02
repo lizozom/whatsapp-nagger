@@ -15,7 +15,7 @@ import (
 // their own phone number.
 type OTPSender interface {
 	SendDM(phone, text string) error
-	Write(text string) error // group message fallback
+	Write(groupID, text string) error // group message fallback (tenant zero)
 }
 
 // AuthHandler holds dependencies for the OTP auth endpoints.
@@ -25,6 +25,7 @@ type AuthHandler struct {
 	Allowlist    map[string]string // phone → name (from personas)
 	JWTSecret    []byte
 	DashboardURL string // e.g. "https://whatsapp-nagger.fly.dev"
+	GroupID      string // tenant-zero JID for the OTP-to-group fallback
 }
 
 // GenerateMagicLink creates a one-tap login URL for the given phone by
@@ -91,7 +92,7 @@ func (ah *AuthHandler) handleOTP(w http.ResponseWriter, r *http.Request) {
 
 	// Send via group message. DMs don't work when the bot is linked to the
 	// same phone as the requester (WhatsApp silently drops them).
-	if err := ah.DM.Write(otpMsg); err != nil {
+	if err := ah.DM.Write(ah.GroupID, otpMsg); err != nil {
 		http.Error(w, "failed to send OTP: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

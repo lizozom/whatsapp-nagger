@@ -96,19 +96,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, "WhatsApp messenger connected.")
 	default:
 		term := messenger.NewTerminal()
-		term.Write("Online. Type [Name]: message to start. Ctrl+C to quit.")
+		term.Write(tenantZeroJID, "Online. Type [Name]: message to start. Ctrl+C to quit.")
 		m = term
 	}
 
-	// Notify endpoint — scraper alerts forwarded to group chat (same HMAC secret).
+	// Notify endpoint — scraper alerts forwarded to tenant-zero group (D9: tenant-zero only in v1).
 	if ingestSecret != "" {
 		mux.Handle("/notify", &ingest.NotifyHandler{
 			Secret: ingestSecret,
-			Write:  m.Write,
+			Write:  func(text string) error { return m.Write(tenantZeroJID, text) },
 		})
 	}
 
-	// Dashboard auth (WhatsApp OTP → JWT).
+	// Dashboard auth (WhatsApp OTP → JWT). Tenant-zero only per D13.
 	if jwtSecret := os.Getenv("JWT_SECRET"); jwtSecret != "" {
 		allowlist := api.BuildAllowlist(api.LoadPersonasFile())
 		auth := &api.AuthHandler{
@@ -117,6 +117,7 @@ func main() {
 			Allowlist:    allowlist,
 			JWTSecret:    []byte(jwtSecret),
 			DashboardURL: os.Getenv("DASHBOARD_URL"),
+			GroupID:      tenantZeroJID,
 		}
 		auth.RegisterAuthRoutes(mux)
 		a.SetDashboardLinker(auth)
@@ -162,20 +163,20 @@ func main() {
 
 		response, err := a.HandleMessage(msg.Sender, msg.Text)
 		if err != nil {
-			m.Write("Error: " + err.Error())
+			m.Write(msg.GroupID, "Error: "+err.Error())
 			continue
 		}
 
-		sendWithMentions(m, response)
+		sendWithMentions(m, msg.GroupID, response)
 	}
 }
 
-func sendWithMentions(m messenger.IMessenger, text string) error {
+func sendWithMentions(m messenger.IMessenger, groupID, text string) error {
 	resolved, mentions := agent.ResolveMentions(text)
 	if len(mentions) > 0 {
-		return m.WriteWithMentions(resolved, mentions)
+		return m.WriteWithMentions(groupID, resolved, mentions)
 	}
-	return m.Write(text)
+	return m.Write(groupID, text)
 }
 
 func startNagScheduler(nagHour string, threshold int, wa *messenger.WhatsApp, store *db.TaskStore, groupID string) {
@@ -255,7 +256,7 @@ func startDigestScheduler(digestHour string, a *agent.Agent, m messenger.IMessen
 			continue
 		}
 
-		if err := sendWithMentions(m, digest); err != nil {
+		if err := sendWithMentions(m, groupID, digest); err != nil {
 			fmt.Fprintf(os.Stderr, "Digest send error: %v\n", err)
 			continue
 		}

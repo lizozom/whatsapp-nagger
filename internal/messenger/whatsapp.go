@@ -20,22 +20,22 @@ import (
 )
 
 type WhatsApp struct {
-	client    *whatsmeow.Client
-	groupJID  types.JID
-	incoming  chan Message
-	discovery bool
-	paired    bool
-	pairCode  string // 8-digit pairing code for web display
+	client        *whatsmeow.Client
+	tenantZeroJID types.JID // v1 single-tenant inbound filter; replaced by allowlist in Story 2.1
+	incoming      chan Message
+	discovery     bool
+	paired        bool
+	pairCode      string // 8-digit pairing code for web display
 }
 
-func NewWhatsApp(dbPath string, groupJID string) (*WhatsApp, error) {
+func NewWhatsApp(dbPath string, tenantZeroJID string) (*WhatsApp, error) {
 	var gJID types.JID
-	discovery := groupJID == ""
+	discovery := tenantZeroJID == ""
 	if !discovery {
 		var err error
-		gJID, err = types.ParseJID(groupJID)
+		gJID, err = types.ParseJID(tenantZeroJID)
 		if err != nil {
-			return nil, fmt.Errorf("invalid group JID %q: %w", groupJID, err)
+			return nil, fmt.Errorf("invalid group JID %q: %w", tenantZeroJID, err)
 		}
 	}
 
@@ -68,11 +68,11 @@ func NewWhatsApp(dbPath string, groupJID string) (*WhatsApp, error) {
 	client := whatsmeow.NewClient(device, nil)
 
 	wa := &WhatsApp{
-		client:    client,
-		groupJID:  gJID,
-		incoming:  make(chan Message, 64),
-		discovery: discovery,
-		paired:    client.Store.ID != nil,
+		client:        client,
+		tenantZeroJID: gJID,
+		incoming:      make(chan Message, 64),
+		discovery:     discovery,
+		paired:        client.Store.ID != nil,
 	}
 
 	if discovery {
@@ -181,7 +181,7 @@ func (wa *WhatsApp) handleEvent(evt interface{}) {
 			return
 		}
 
-		if chat.String() != wa.groupJID.String() {
+		if chat.String() != wa.tenantZeroJID.String() {
 			return
 		}
 
@@ -196,7 +196,7 @@ func (wa *WhatsApp) handleEvent(evt interface{}) {
 		}
 
 		fmt.Fprintf(os.Stderr, "[MSG] %s: %s\n", sender, text)
-		wa.incoming <- Message{Sender: sender, Text: text}
+		wa.incoming <- Message{GroupID: chat.String(), Sender: sender, Text: text}
 	}
 }
 
@@ -221,11 +221,15 @@ func (wa *WhatsApp) Read() (Message, error) {
 	return msg, nil
 }
 
-func (wa *WhatsApp) Write(text string) error {
+func (wa *WhatsApp) Write(groupID, text string) error {
 	if !wa.paired {
 		return fmt.Errorf("not paired yet — scan QR code first")
 	}
-	_, err := wa.client.SendMessage(context.Background(), wa.groupJID, &waE2E.Message{
+	jid, err := types.ParseJID(groupID)
+	if err != nil {
+		return fmt.Errorf("invalid group_id %q: %w", groupID, err)
+	}
+	_, err = wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		Conversation: proto.String("🤖 " + text),
 	})
 	return err
@@ -285,12 +289,16 @@ func (wa *WhatsApp) SendDM(phone, text string) error {
 	return err
 }
 
-func (wa *WhatsApp) WriteWithMentions(text string, mentions []Mention) error {
+func (wa *WhatsApp) WriteWithMentions(groupID, text string, mentions []Mention) error {
 	if !wa.paired {
 		return fmt.Errorf("not paired yet — scan QR code first")
 	}
 	if len(mentions) == 0 {
-		return wa.Write(text)
+		return wa.Write(groupID, text)
+	}
+	jid, err := types.ParseJID(groupID)
+	if err != nil {
+		return fmt.Errorf("invalid group_id %q: %w", groupID, err)
 	}
 
 	jids := make([]string, len(mentions))
@@ -298,7 +306,7 @@ func (wa *WhatsApp) WriteWithMentions(text string, mentions []Mention) error {
 		jids[i] = m.Phone + "@s.whatsapp.net"
 	}
 
-	_, err := wa.client.SendMessage(context.Background(), wa.groupJID, &waE2E.Message{
+	_, err = wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			Text: proto.String("🤖 " + text),
 			ContextInfo: &waE2E.ContextInfo{

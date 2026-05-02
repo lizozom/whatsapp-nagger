@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+// devGroupID is the synthesized GroupID for terminal-mode messages. Every
+// inbound terminal Read carries this value, and Writes ignore the explicit
+// group_id since terminal mode has only one output channel anyway.
+const devGroupID = "dev-group"
+
 type Terminal struct {
 	scanner *bufio.Scanner
 }
@@ -26,27 +31,29 @@ func (t *Terminal) Read() (Message, error) {
 
 	line := strings.TrimSpace(t.scanner.Text())
 	if line == "" {
-		return Message{Sender: "Unknown", Text: ""}, nil
+		return Message{GroupID: devGroupID, Sender: "Unknown", Text: ""}, nil
 	}
 
 	// Parse "[Name]: message" format
 	if strings.HasPrefix(line, "[") {
 		if idx := strings.Index(line, "]: "); idx > 1 {
 			return Message{
-				Sender: line[1:idx],
-				Text:   line[idx+3:],
+				GroupID: devGroupID,
+				Sender:  line[1:idx],
+				Text:    line[idx+3:],
 			}, nil
 		}
 	}
 
-	return Message{Sender: "Unknown", Text: line}, nil
+	return Message{GroupID: devGroupID, Sender: "Unknown", Text: line}, nil
 }
 
-func (t *Terminal) Write(text string) error {
+// Write ignores groupID — terminal mode has a single stdout channel.
+func (t *Terminal) Write(groupID, text string) error {
 	fmt.Printf("[Nagger]: %s\n", text)
 	return nil
 }
 
-func (t *Terminal) WriteWithMentions(text string, mentions []Mention) error {
-	return t.Write(text)
+func (t *Terminal) WriteWithMentions(groupID, text string, mentions []Mention) error {
+	return t.Write(groupID, text)
 }
