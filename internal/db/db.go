@@ -8,8 +8,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Task is the user-facing representation of a row in the tasks table.
+//
+// ID is the per-group sequence number (group_seq), not the SQLite rowid.
+// Each group's tasks are numbered 1, 2, 3, ... independently. This is the
+// number the LLM uses in update_task / delete_task and the number users see
+// in chat. The internal SQLite rowid is no longer exposed.
 type Task struct {
-	ID        int64  `json:"id"`
+	ID        int64  `json:"id"` // per-group sequence (1, 2, 3, ...)
 	Content   string `json:"content"`
 	Assignee  string `json:"assignee"`
 	Status    string `json:"status"`
@@ -52,23 +58,41 @@ func NewTaskStore(dbPath string) (*TaskStore, error) {
 	return &TaskStore{db: db}, nil
 }
 
-// AddTask inserts a new task scoped to groupID.
+// AddTask inserts a new task scoped to groupID. Allocates the next per-group
+// sequence number atomically so two concurrent inserts in the same group
+// don't collide on (group_id, group_seq).
 func (s *TaskStore) AddTask(groupID, content, assignee, dueDate string) (*Task, error) {
-	res, err := s.db.Exec(
-		"INSERT INTO tasks (group_id, content, assignee, due_date) VALUES (?, ?, ?, ?)",
-		groupID, content, assignee, dueDate,
-	)
+	tx, err := s.db.Begin()
 	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var nextSeq int64
+	if err := tx.QueryRow(
+		"SELECT COALESCE(MAX(group_seq), 0) + 1 FROM tasks WHERE group_id = ?",
+		groupID,
+	).Scan(&nextSeq); err != nil {
+		return nil, fmt.Errorf("compute next group_seq: %w", err)
+	}
+
+	if _, err := tx.Exec(
+		"INSERT INTO tasks (group_id, group_seq, content, assignee, due_date) VALUES (?, ?, ?, ?, ?)",
+		groupID, nextSeq, content, assignee, dueDate,
+	); err != nil {
 		return nil, fmt.Errorf("insert task: %w", err)
 	}
 
-	id, _ := res.LastInsertId()
-	return s.getByID(groupID, id)
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit add task: %w", err)
+	}
+	return s.getByID(groupID, nextSeq)
 }
 
 // ListTasks returns tasks scoped to groupID, optionally filtered by assignee/status.
+// Each Task.ID is the per-group sequence number, not the SQLite rowid.
 func (s *TaskStore) ListTasks(groupID, assignee, status string) ([]Task, error) {
-	query := "SELECT id, content, assignee, status, COALESCE(due_date,''), created_at, updated_at FROM tasks WHERE group_id = ?"
+	query := "SELECT group_seq, content, assignee, status, COALESCE(due_date,''), created_at, updated_at FROM tasks WHERE group_id = ?"
 	args := []any{groupID}
 
 	if assignee != "" {
@@ -113,10 +137,10 @@ func (u TaskUpdate) IsEmpty() bool {
 	return u.Status == "" && u.DueDate == "" && u.Content == "" && u.Assignee == ""
 }
 
-// UpdateTask updates a task within groupID. Only sets fields that are non-empty.
-// Returns the post-update task. If no fields are set, returns the current row
-// unchanged (callers should use IsEmpty to detect the no-op case if relevant).
-func (s *TaskStore) UpdateTask(groupID string, id int64, fields TaskUpdate) (*Task, error) {
+// UpdateTask updates a task within groupID, identified by its per-group
+// sequence number. Only sets fields that are non-empty. Returns the post-
+// update task. If no fields are set, returns the current row unchanged.
+func (s *TaskStore) UpdateTask(groupID string, groupSeq int64, fields TaskUpdate) (*Task, error) {
 	var setClauses []string
 	var args []any
 
@@ -137,18 +161,18 @@ func (s *TaskStore) UpdateTask(groupID string, id int64, fields TaskUpdate) (*Ta
 		args = append(args, fields.Assignee)
 	}
 	if len(setClauses) == 0 {
-		return s.getByID(groupID, id)
+		return s.getByID(groupID, groupSeq)
 	}
 
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
-	args = append(args, id, groupID)
+	args = append(args, groupSeq, groupID)
 
-	query := fmt.Sprintf("UPDATE tasks SET %s WHERE id = ? AND group_id = ?", strings.Join(setClauses, ", "))
+	query := fmt.Sprintf("UPDATE tasks SET %s WHERE group_seq = ? AND group_id = ?", strings.Join(setClauses, ", "))
 	_, err := s.db.Exec(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("update task: %w", err)
 	}
-	return s.getByID(groupID, id)
+	return s.getByID(groupID, groupSeq)
 }
 
 // ReassignPending bulk-reassigns all pending tasks in groupID from oldName to
@@ -168,15 +192,16 @@ func (s *TaskStore) ReassignPending(groupID, oldName, newName string) (int64, er
 	return n, nil
 }
 
-// DeleteTask removes a task within groupID. Returns an error if the task doesn't exist in that group.
-func (s *TaskStore) DeleteTask(groupID string, id int64) error {
-	res, err := s.db.Exec("DELETE FROM tasks WHERE id = ? AND group_id = ?", id, groupID)
+// DeleteTask removes a task within groupID by per-group sequence number.
+// Returns an error if the task doesn't exist in that group.
+func (s *TaskStore) DeleteTask(groupID string, groupSeq int64) error {
+	res, err := s.db.Exec("DELETE FROM tasks WHERE group_seq = ? AND group_id = ?", groupSeq, groupID)
 	if err != nil {
 		return fmt.Errorf("delete task: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("task %d not found", id)
+		return fmt.Errorf("task %d not found", groupSeq)
 	}
 	return nil
 }
@@ -232,15 +257,19 @@ func (s *TaskStore) SetMeta(groupID, key, value string) error {
 	return err
 }
 
-func (s *TaskStore) getByID(groupID string, id int64) (*Task, error) {
+// getByID looks up a task by per-group sequence number. The function name is
+// kept (rather than getByGroupSeq) for source-history readability — the
+// argument has been renamed from id to groupSeq to make the semantic shift
+// explicit at call sites.
+func (s *TaskStore) getByID(groupID string, groupSeq int64) (*Task, error) {
 	var t Task
 	err := s.db.QueryRow(
-		`SELECT id, content, assignee, status, COALESCE(due_date,''), created_at, updated_at
-		 FROM tasks WHERE id = ? AND group_id = ?`,
-		id, groupID,
+		`SELECT group_seq, content, assignee, status, COALESCE(due_date,''), created_at, updated_at
+		 FROM tasks WHERE group_seq = ? AND group_id = ?`,
+		groupSeq, groupID,
 	).Scan(&t.ID, &t.Content, &t.Assignee, &t.Status, &t.DueDate, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("get task %d: %w", id, err)
+		return nil, fmt.Errorf("get task %d: %w", groupSeq, err)
 	}
 	return &t, nil
 }

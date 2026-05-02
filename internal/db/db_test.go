@@ -216,6 +216,72 @@ func TestUpdateTaskEmptyIsNoOp(t *testing.T) {
 	}
 }
 
+func TestAddTaskUsesPerGroupSequence(t *testing.T) {
+	store := newTestStore(t)
+	groupA := "120363SEQA@g.us"
+	groupB := "120363SEQB@g.us"
+
+	// Two tasks in A, one in B, one more in A.
+	a1, _ := store.AddTask(groupA, "A1", "Alice", "")
+	a2, _ := store.AddTask(groupA, "A2", "Alice", "")
+	b1, _ := store.AddTask(groupB, "B1", "Bob", "")
+	a3, _ := store.AddTask(groupA, "A3", "Alice", "")
+
+	if a1.ID != 1 || a2.ID != 2 || a3.ID != 3 {
+		t.Errorf("group A should be 1, 2, 3 — got %d, %d, %d", a1.ID, a2.ID, a3.ID)
+	}
+	if b1.ID != 1 {
+		t.Errorf("group B should start at 1 — got %d", b1.ID)
+	}
+}
+
+func TestUpdateAndDeleteByPerGroupSequence(t *testing.T) {
+	store := newTestStore(t)
+	groupA := "120363SEQX@g.us"
+	groupB := "120363SEQY@g.us"
+
+	store.AddTask(groupA, "A1", "Alice", "")
+	a2, _ := store.AddTask(groupA, "A2", "Alice", "")
+	b1, _ := store.AddTask(groupB, "B1", "Bob", "")
+
+	// Both groups now have a task with ID=1; updating group A's #1 must not
+	// affect group B's #1.
+	if _, err := store.UpdateTask(groupA, 1, TaskUpdate{Status: "done"}); err != nil {
+		t.Fatalf("update A#1: %v", err)
+	}
+	bRow, _ := store.ListTasks(groupB, "", "")
+	if len(bRow) != 1 || bRow[0].Status != "pending" {
+		t.Errorf("group B's #1 should be unaffected, got %+v", bRow)
+	}
+
+	// Delete A#2 — verify it's gone from A but B's tasks are intact.
+	if err := store.DeleteTask(groupA, a2.ID); err != nil {
+		t.Fatalf("delete A#2: %v", err)
+	}
+	bRow, _ = store.ListTasks(groupB, "", "")
+	if len(bRow) != 1 || bRow[0].ID != b1.ID {
+		t.Errorf("group B should still have #1 after deleting A#2: %+v", bRow)
+	}
+}
+
+func TestSequenceContinuesAfterDelete(t *testing.T) {
+	// After deleting a middle task, new inserts should NOT reuse the deleted
+	// ID — they should continue from MAX+1. Otherwise a user who said
+	// "delete task 2" then "task 2 is now blah" could get a confusing alias.
+	store := newTestStore(t)
+	groupA := "120363SEQZ@g.us"
+
+	store.AddTask(groupA, "A1", "Alice", "")
+	a2, _ := store.AddTask(groupA, "A2", "Alice", "")
+	store.AddTask(groupA, "A3", "Alice", "")
+
+	store.DeleteTask(groupA, a2.ID)
+	a4, _ := store.AddTask(groupA, "A4", "Alice", "")
+	if a4.ID != 4 {
+		t.Errorf("after delete-then-add, expected ID=4 (MAX+1), got %d", a4.ID)
+	}
+}
+
 func TestReassignPendingOnly(t *testing.T) {
 	store := newTestStore(t)
 	t1, _ := store.AddTask(testGroupID, "open task", "Alice", "")

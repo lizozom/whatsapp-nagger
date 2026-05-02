@@ -22,6 +22,7 @@ var migrations = []Migration{
 	{ID: 1, Name: "groups", Up: migrate001Groups},
 	{ID: 2, Name: "backfill_tenant_zero", Up: migrate002BackfillTenantZero},
 	{ID: 3, Name: "metadata_composite_pk", Up: migrate003MetadataCompositePK},
+	{ID: 4, Name: "per_group_task_seq", Up: migrate004PerGroupTaskSeq},
 }
 
 func firstLine(s string) string {
