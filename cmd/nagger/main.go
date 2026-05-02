@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -15,6 +17,7 @@ import (
 	"github.com/lizozom/whatsapp-nagger/internal/db"
 	"github.com/lizozom/whatsapp-nagger/internal/ingest"
 	"github.com/lizozom/whatsapp-nagger/internal/messenger"
+	"github.com/lizozom/whatsapp-nagger/internal/scheduler"
 )
 
 func main() {
@@ -50,15 +53,30 @@ func main() {
 	}
 	migrationDB.Close()
 
-	// Tenant-zero JID — used for every store call in v1 since the codebase
-	// is still single-group-aware at the call sites. Epic 2's dispatcher
-	// will replace per-message with envelope-derived group_id.
+	// Tenant-zero JID — still used by tenant-zero-only callers (ingest, notify,
+	// dashboard auth, schedulers in v1). The dispatcher derives per-message
+	// group_id from the inbound envelope; this constant is just for tenant-zero
+	// callers that haven't been per-group-ified yet.
 	tenantZeroJID := os.Getenv("WHATSAPP_GROUP_JID")
 	if tenantZeroJID == "" {
 		tenantZeroJID = "dev-group"
 	}
 
-	a := agent.NewAgent(store, txStore, tenantZeroJID)
+	groupStore, err := db.NewGroupStore(tasksDBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open group store: %v\n", err)
+		os.Exit(1)
+	}
+	defer groupStore.Close()
+	memberStore, err := db.NewMemberStore(tasksDBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open member store: %v\n", err)
+		os.Exit(1)
+	}
+	defer memberStore.Close()
+
+	history := agent.NewHistory()
+	mainAgent := agent.NewAgent(store, txStore, groupStore, memberStore, history)
 
 	// --- Single HTTP mux for all endpoints ---
 	mux := http.NewServeMux()
@@ -85,7 +103,8 @@ func main() {
 		if dbPath == "" {
 			dbPath = "whatsapp_session.db"
 		}
-		wa, waErr := messenger.NewWhatsApp(dbPath, groupJID)
+		allowlist := messenger.ParseAllowlist(os.Getenv("ALLOWED_PHONES"))
+		wa, waErr := messenger.NewWhatsApp(dbPath, groupJID, allowlist, groupStore)
 		if waErr != nil {
 			fmt.Fprintf(os.Stderr, "Failed to init WhatsApp: %v\n", waErr)
 			os.Exit(1)
@@ -93,7 +112,7 @@ func main() {
 		wa.RegisterRoutes(mux)
 		m = wa
 		otpSender = wa
-		fmt.Fprintln(os.Stderr, "WhatsApp messenger connected.")
+		slog.Info("WhatsApp messenger connected", slog.Int("allowlist_size", allowlist.Size()))
 	default:
 		term := messenger.NewTerminal()
 		term.Write(tenantZeroJID, "Online. Type [Name]: message to start. Ctrl+C to quit.")
@@ -120,9 +139,13 @@ func main() {
 			GroupID:      tenantZeroJID,
 		}
 		auth.RegisterAuthRoutes(mux)
-		a.SetDashboardLinker(auth)
+		mainAgent.SetDashboardLinker(auth)
 		fmt.Fprintf(os.Stderr, "Dashboard auth enabled (%d allowed phones).\n", len(allowlist))
 	}
+
+	// Two-agent dispatcher: routes by groups.onboarding_state per message (D1).
+	onboardingAgent := agent.NewOnboardingAgent(groupStore, memberStore, history, m)
+	dispatcher := agent.NewDispatcher(groupStore, mainAgent, onboardingAgent, m)
 
 	// Start the single HTTP server.
 	port := os.Getenv("INGEST_PORT")
@@ -137,18 +160,39 @@ func main() {
 		}
 	}()
 
-	if digestHour := os.Getenv("DIGEST_HOUR"); digestHour != "" {
-		go startDigestScheduler(digestHour, a, m, store, tenantZeroJID)
+	// Group-iterating digest scheduler (Story 2.7). Per-group hour + tz from
+	// the groups table — no global DIGEST_HOUR env required, but we keep an
+	// env presence check to allow disabling all scheduling for dev runs.
+	if os.Getenv("DIGEST_HOUR") != "" || os.Getenv("MESSENGER") == "whatsapp" {
+		go scheduler.RunDigest(context.Background(), scheduler.DigestDeps{
+			Groups:    groupStore,
+			Tasks:     store,
+			Agent:     mainAgent,
+			Messenger: m,
+		})
 	}
 
-	// Nag DM scheduler — sends private reminders to people with too many overdue tasks.
-	if nagHour := os.Getenv("NAG_HOUR"); nagHour != "" {
+	// Nag DM scheduler. Still uses a global NAG_HOUR (operator policy, not
+	// per-group preference) and fires only in WhatsApp mode (terminal has
+	// no DM channel).
+	if nagHourStr := os.Getenv("NAG_HOUR"); nagHourStr != "" {
 		if wa, ok := m.(*messenger.WhatsApp); ok {
-			threshold := 4
-			if v, err := strconv.Atoi(os.Getenv("NAG_THRESHOLD")); err == nil && v > 0 {
-				threshold = v
+			nagHour, err := strconv.Atoi(strings.TrimSuffix(nagHourStr, ":00"))
+			if err != nil || nagHour < 0 || nagHour > 23 {
+				fmt.Fprintf(os.Stderr, "NAG_HOUR must be 0..23, got %q — nag scheduler disabled\n", nagHourStr)
+			} else {
+				threshold := 4
+				if v, err := strconv.Atoi(os.Getenv("NAG_THRESHOLD")); err == nil && v > 0 {
+					threshold = v
+				}
+				go scheduler.RunNag(context.Background(), scheduler.NagDeps{
+					Groups:    groupStore,
+					Members:   memberStore,
+					Tasks:     store,
+					DM:        wa,
+					Threshold: threshold,
+				}, nagHour)
 			}
-			go startNagScheduler(nagHour, threshold, wa, store, tenantZeroJID)
 		}
 	}
 
@@ -161,107 +205,12 @@ func main() {
 			continue
 		}
 
-		response, err := a.HandleMessage(msg.Sender, msg.Text)
-		if err != nil {
+		if err := dispatcher.Handle(context.Background(), msg.GroupID, msg.Sender, msg.Text); err != nil {
+			slog.Error("dispatch handle failed",
+				slog.String("group_id", msg.GroupID),
+				slog.String("error", err.Error()))
 			m.Write(msg.GroupID, "Error: "+err.Error())
-			continue
 		}
-
-		sendWithMentions(m, msg.GroupID, response)
 	}
 }
 
-func sendWithMentions(m messenger.IMessenger, groupID, text string) error {
-	resolved, mentions := agent.ResolveMentions(text)
-	if len(mentions) > 0 {
-		return m.WriteWithMentions(groupID, resolved, mentions)
-	}
-	return m.Write(groupID, text)
-}
-
-func startNagScheduler(nagHour string, threshold int, wa *messenger.WhatsApp, store *db.TaskStore, groupID string) {
-	loc, _ := time.LoadLocation("Asia/Jerusalem")
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	phones := agent.ParsePersonaPhones(agent.LoadPersonas())
-	fmt.Fprintf(os.Stderr, "Nag scheduler enabled at %s (threshold: %d overdue tasks).\n", nagHour, threshold)
-
-	for range ticker.C {
-		now := time.Now().In(loc)
-		currentTime := now.Format("15:04")
-		today := now.Format("2006-01-02")
-
-		if currentTime != nagHour {
-			continue
-		}
-
-		lastDate, _ := store.GetMeta(groupID, "last_nag_date")
-		if lastDate == today {
-			continue
-		}
-
-		counts, err := store.CountOverdueByAssignee(groupID, today)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Nag: overdue query error: %v\n", err)
-			continue
-		}
-
-		nagged := 0
-		for assignee, count := range counts {
-			if count < threshold {
-				continue
-			}
-			phone, ok := phones[assignee]
-			if !ok || phone == "" {
-				continue
-			}
-			msg := fmt.Sprintf("You have %d overdue tasks. That's not a flex. Open the group and sort it out before I start nagging in public.", count)
-			if err := wa.SendDM(phone, msg); err != nil {
-				fmt.Fprintf(os.Stderr, "Nag: failed to DM %s: %v\n", assignee, err)
-				continue
-			}
-			fmt.Fprintf(os.Stderr, "Nag: sent DM to %s (%d overdue).\n", assignee, count)
-			nagged++
-		}
-
-		store.SetMeta(groupID, "last_nag_date", today)
-		fmt.Fprintf(os.Stderr, "Nag: done for %s, nagged %d people.\n", today, nagged)
-	}
-}
-
-func startDigestScheduler(digestHour string, a *agent.Agent, m messenger.IMessenger, store *db.TaskStore, groupID string) {
-	loc, _ := time.LoadLocation("Asia/Jerusalem")
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		now := time.Now().In(loc)
-		currentTime := now.Format("15:04")
-		today := now.Format("2006-01-02")
-
-		if currentTime != digestHour {
-			continue
-		}
-
-		lastDate, _ := store.GetMeta(groupID, "last_digest_date")
-		if lastDate == today {
-			continue
-		}
-
-		fmt.Fprintln(os.Stderr, "Firing daily digest...")
-		digest, err := a.HandleMessage("System", "Generate the daily digest.")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Digest error: %v\n", err)
-			continue
-		}
-
-		if err := sendWithMentions(m, groupID, digest); err != nil {
-			fmt.Fprintf(os.Stderr, "Digest send error: %v\n", err)
-			continue
-		}
-
-		store.SetMeta(groupID, "last_digest_date", today)
-		fmt.Fprintln(os.Stderr, "Daily digest sent.")
-	}
-}

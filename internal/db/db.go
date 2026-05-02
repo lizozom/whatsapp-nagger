@@ -98,18 +98,43 @@ func (s *TaskStore) ListTasks(groupID, assignee, status string) ([]Task, error) 
 	return tasks, rows.Err()
 }
 
+// TaskUpdate is the partial-update payload for UpdateTask. Each field is
+// applied iff non-empty; an empty field leaves the existing column untouched.
+type TaskUpdate struct {
+	Status   string
+	DueDate  string
+	Content  string
+	Assignee string
+}
+
+// IsEmpty reports whether no field is set — callers can short-circuit a no-op
+// update or the LLM-facing tool can refuse it.
+func (u TaskUpdate) IsEmpty() bool {
+	return u.Status == "" && u.DueDate == "" && u.Content == "" && u.Assignee == ""
+}
+
 // UpdateTask updates a task within groupID. Only sets fields that are non-empty.
-func (s *TaskStore) UpdateTask(groupID string, id int64, status, dueDate string) (*Task, error) {
+// Returns the post-update task. If no fields are set, returns the current row
+// unchanged (callers should use IsEmpty to detect the no-op case if relevant).
+func (s *TaskStore) UpdateTask(groupID string, id int64, fields TaskUpdate) (*Task, error) {
 	var setClauses []string
 	var args []any
 
-	if status != "" {
+	if fields.Status != "" {
 		setClauses = append(setClauses, "status = ?")
-		args = append(args, status)
+		args = append(args, fields.Status)
 	}
-	if dueDate != "" {
+	if fields.DueDate != "" {
 		setClauses = append(setClauses, "due_date = ?")
-		args = append(args, dueDate)
+		args = append(args, fields.DueDate)
+	}
+	if fields.Content != "" {
+		setClauses = append(setClauses, "content = ?")
+		args = append(args, fields.Content)
+	}
+	if fields.Assignee != "" {
+		setClauses = append(setClauses, "assignee = ?")
+		args = append(args, fields.Assignee)
 	}
 	if len(setClauses) == 0 {
 		return s.getByID(groupID, id)
@@ -124,6 +149,23 @@ func (s *TaskStore) UpdateTask(groupID string, id int64, status, dueDate string)
 		return nil, fmt.Errorf("update task: %w", err)
 	}
 	return s.getByID(groupID, id)
+}
+
+// ReassignPending bulk-reassigns all pending tasks in groupID from oldName to
+// newName. Done tasks keep their original assignee (historical record per
+// Story 2.6). Returns the count of rows affected.
+func (s *TaskStore) ReassignPending(groupID, oldName, newName string) (int64, error) {
+	res, err := s.db.Exec(`
+		UPDATE tasks
+		SET assignee = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE group_id = ? AND assignee = ? AND status = 'pending'`,
+		newName, groupID, oldName,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("reassign pending tasks: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // DeleteTask removes a task within groupID. Returns an error if the task doesn't exist in that group.

@@ -133,7 +133,7 @@ func TestListTasksByStatus(t *testing.T) {
 
 	task, _ := store.AddTask(testGroupID, "Task 1", "Bob", "")
 	store.AddTask(testGroupID, "Task 2", "Bob", "")
-	store.UpdateTask(testGroupID, task.ID, "done", "")
+	store.UpdateTask(testGroupID, task.ID, TaskUpdate{Status: "done"})
 
 	pending, err := store.ListTasks(testGroupID, "", "pending")
 	if err != nil {
@@ -152,11 +152,102 @@ func TestListTasksByStatus(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskContent(t *testing.T) {
+	store := newTestStore(t)
+
+	task, _ := store.AddTask(testGroupID, "Fix the sink", "Bob", "")
+	updated, err := store.UpdateTask(testGroupID, task.ID, TaskUpdate{Content: "Fix the kitchen sink, please"})
+	if err != nil {
+		t.Fatalf("UpdateTask content: %v", err)
+	}
+	if updated.Content != "Fix the kitchen sink, please" {
+		t.Errorf("Content: got %q", updated.Content)
+	}
+	if updated.Assignee != "Bob" {
+		t.Errorf("Assignee should be unchanged, got %q", updated.Assignee)
+	}
+}
+
+func TestUpdateTaskAssignee(t *testing.T) {
+	store := newTestStore(t)
+
+	task, _ := store.AddTask(testGroupID, "Fix the sink", "Bob", "")
+	updated, err := store.UpdateTask(testGroupID, task.ID, TaskUpdate{Assignee: "Alice"})
+	if err != nil {
+		t.Fatalf("UpdateTask assignee: %v", err)
+	}
+	if updated.Assignee != "Alice" {
+		t.Errorf("Assignee: got %q, want Alice", updated.Assignee)
+	}
+	if updated.Content != "Fix the sink" {
+		t.Errorf("Content should be unchanged, got %q", updated.Content)
+	}
+}
+
+func TestUpdateTaskCombinedFields(t *testing.T) {
+	store := newTestStore(t)
+
+	task, _ := store.AddTask(testGroupID, "Fix the sink", "Bob", "")
+	updated, err := store.UpdateTask(testGroupID, task.ID, TaskUpdate{
+		Content:  "Fix the bathroom sink",
+		Assignee: "Alice",
+		DueDate:  "2026-06-01",
+		Status:   "done",
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask combined: %v", err)
+	}
+	if updated.Content != "Fix the bathroom sink" || updated.Assignee != "Alice" ||
+		updated.DueDate != "2026-06-01" || updated.Status != "done" {
+		t.Errorf("combined update did not apply all fields: %+v", updated)
+	}
+}
+
+func TestUpdateTaskEmptyIsNoOp(t *testing.T) {
+	store := newTestStore(t)
+
+	task, _ := store.AddTask(testGroupID, "Fix the sink", "Bob", "")
+	got, err := store.UpdateTask(testGroupID, task.ID, TaskUpdate{})
+	if err != nil {
+		t.Fatalf("UpdateTask noop: %v", err)
+	}
+	if got.Content != "Fix the sink" || got.Assignee != "Bob" {
+		t.Errorf("noop update should not change row, got %+v", got)
+	}
+}
+
+func TestReassignPendingOnly(t *testing.T) {
+	store := newTestStore(t)
+	t1, _ := store.AddTask(testGroupID, "open task", "Alice", "")
+	store.AddTask(testGroupID, "another open", "Alice", "")
+	doneTask, _ := store.AddTask(testGroupID, "done task", "Alice", "")
+	store.UpdateTask(testGroupID, doneTask.ID, TaskUpdate{Status: "done"})
+
+	n, err := store.ReassignPending(testGroupID, "Alice", "Bob")
+	if err != nil {
+		t.Fatalf("ReassignPending: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 pending reassignments, got %d", n)
+	}
+
+	pending, _ := store.ListTasks(testGroupID, "Bob", "pending")
+	if len(pending) != 2 {
+		t.Errorf("Bob's pending tasks: got %d, want 2", len(pending))
+	}
+	// Done task keeps its original assignee.
+	doneList, _ := store.ListTasks(testGroupID, "", "done")
+	if len(doneList) != 1 || doneList[0].Assignee != "Alice" {
+		t.Errorf("done task should keep Alice as assignee: %+v", doneList)
+	}
+	_ = t1 // reference to silence unused var
+}
+
 func TestUpdateTask(t *testing.T) {
 	store := newTestStore(t)
 
 	task, _ := store.AddTask(testGroupID, "Fix the sink", "Bob", "")
-	updated, err := store.UpdateTask(testGroupID, task.ID, "done", "")
+	updated, err := store.UpdateTask(testGroupID, task.ID, TaskUpdate{Status: "done"})
 	if err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
@@ -40,13 +41,13 @@ func newTestAgent(t *testing.T) *Agent {
 	migDB.Close()
 
 	t.Cleanup(func() { store.Close() })
-	return &Agent{store: store, groupID: testGroupID}
+	return &Agent{store: store, history: NewHistory()}
 }
 
 func TestExecuteToolAddTask(t *testing.T) {
 	a := newTestAgent(t)
 
-	result, err := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Bob","due_date":"2026-03-25"}`))
+	result, err := a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Fix sink","assignee":"Bob","due_date":"2026-03-25"}`))
 	if err != nil {
 		t.Fatalf("ExecuteTool add_task: %v", err)
 	}
@@ -69,10 +70,10 @@ func TestExecuteToolAddTask(t *testing.T) {
 func TestExecuteToolListTasks(t *testing.T) {
 	a := newTestAgent(t)
 
-	a.ExecuteTool("add_task", []byte(`{"content":"Task 1","assignee":"Bob"}`))
-	a.ExecuteTool("add_task", []byte(`{"content":"Task 2","assignee":"Alice"}`))
+	a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Task 1","assignee":"Bob"}`))
+	a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Task 2","assignee":"Alice"}`))
 
-	result, err := a.ExecuteTool("list_tasks", []byte(`{"assignee":"Bob"}`))
+	result, err := a.ExecuteTool(testGroupID, "list_tasks", []byte(`{"assignee":"Bob"}`))
 	if err != nil {
 		t.Fatalf("ExecuteTool list_tasks: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestExecuteToolListTasks(t *testing.T) {
 func TestExecuteToolListTasksEmpty(t *testing.T) {
 	a := newTestAgent(t)
 
-	result, err := a.ExecuteTool("list_tasks", []byte(`{}`))
+	result, err := a.ExecuteTool(testGroupID, "list_tasks", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("ExecuteTool list_tasks: %v", err)
 	}
@@ -279,15 +280,127 @@ func TestDefaultBillingCycleRange(t *testing.T) {
 	}
 }
 
+// newTestAgentWithMembers wires up an Agent with a real MemberStore + GroupStore
+// so update_task's assignee-against-roster validation can be exercised.
+// Returns the agent plus the member store so tests can seed members.
+func newTestAgentWithMembers(t *testing.T) (*Agent, *db.MemberStore) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := db.NewTaskStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewTaskStore: %v", err)
+	}
+	txStore, err := db.NewTxStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewTxStore: %v", err)
+	}
+	txStore.Close()
+
+	migDB, _ := sql.Open("sqlite", dbPath)
+	t.Setenv("WHATSAPP_GROUP_JID", "")
+	if err := db.RunMigrations(migDB); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	migDB.Close()
+
+	gs, _ := db.NewGroupStore(dbPath)
+	ms, _ := db.NewMemberStore(dbPath)
+	// Seed a complete group so the agent's loadGroupContext returns it.
+	gs.Create(context.Background(), db.Group{ID: testGroupID, OnboardingState: "complete", FinancialEnabled: true})
+
+	t.Cleanup(func() {
+		store.Close()
+		gs.Close()
+		ms.Close()
+	})
+	return &Agent{store: store, groups: gs, members: ms, history: NewHistory()}, ms
+}
+
+func TestExecuteToolUpdateTask_AssigneeValidatedAgainstMembers(t *testing.T) {
+	a, ms := newTestAgentWithMembers(t)
+	ctx := context.Background()
+	ms.Add(ctx, testGroupID, db.Member{GroupID: testGroupID, WhatsAppID: "100000000001", DisplayName: "Alice"})
+	ms.Add(ctx, testGroupID, db.Member{GroupID: testGroupID, WhatsAppID: "100000000002", DisplayName: "Bob"})
+
+	addResult, _ := a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Fix sink","assignee":"Bob"}`))
+	var added db.Task
+	json.Unmarshal([]byte(addResult), &added)
+
+	// Reassign to a known member → success.
+	input, _ := json.Marshal(map[string]any{"id": added.ID, "assignee": "Alice"})
+	result, err := a.ExecuteTool(testGroupID, "update_task", input)
+	if err != nil {
+		t.Fatalf("reassign to known member: %v", err)
+	}
+	var updated db.Task
+	json.Unmarshal([]byte(result), &updated)
+	if updated.Assignee != "Alice" {
+		t.Errorf("Assignee: got %q, want Alice", updated.Assignee)
+	}
+}
+
+func TestExecuteToolUpdateTask_RefusesUnknownAssignee(t *testing.T) {
+	a, ms := newTestAgentWithMembers(t)
+	ctx := context.Background()
+	ms.Add(ctx, testGroupID, db.Member{GroupID: testGroupID, WhatsAppID: "100000000001", DisplayName: "Alice"})
+
+	addResult, _ := a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Fix sink","assignee":"Alice"}`))
+	var added db.Task
+	json.Unmarshal([]byte(addResult), &added)
+
+	input, _ := json.Marshal(map[string]any{"id": added.ID, "assignee": "Carol"})
+	_, err := a.ExecuteTool(testGroupID, "update_task", input)
+	if err == nil {
+		t.Fatal("expected refusal — Carol is not a member")
+	}
+	if !strings.Contains(err.Error(), "unknown assignee") {
+		t.Errorf("error should mention unknown assignee: %v", err)
+	}
+}
+
+func TestExecuteToolUpdateTask_ContentOnly(t *testing.T) {
+	a, _ := newTestAgentWithMembers(t)
+	addResult, _ := a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Fix sink","assignee":"Alice"}`))
+	var added db.Task
+	json.Unmarshal([]byte(addResult), &added)
+
+	input, _ := json.Marshal(map[string]any{"id": added.ID, "content": "Fix the kitchen sink"})
+	result, err := a.ExecuteTool(testGroupID, "update_task", input)
+	if err != nil {
+		t.Fatalf("content-only update: %v", err)
+	}
+	var updated db.Task
+	json.Unmarshal([]byte(result), &updated)
+	if updated.Content != "Fix the kitchen sink" {
+		t.Errorf("Content: got %q", updated.Content)
+	}
+}
+
+func TestExecuteToolUpdateTask_RefusesEmptyUpdate(t *testing.T) {
+	a, _ := newTestAgentWithMembers(t)
+	addResult, _ := a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Fix sink","assignee":"Alice"}`))
+	var added db.Task
+	json.Unmarshal([]byte(addResult), &added)
+
+	input, _ := json.Marshal(map[string]any{"id": added.ID})
+	_, err := a.ExecuteTool(testGroupID, "update_task", input)
+	if err == nil {
+		t.Fatal("expected refusal — no fields provided")
+	}
+	if !strings.Contains(err.Error(), "no fields provided") {
+		t.Errorf("error should explain missing fields: %v", err)
+	}
+}
+
 func TestExecuteToolUpdateTask(t *testing.T) {
 	a := newTestAgent(t)
 
-	addResult, _ := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Bob"}`))
+	addResult, _ := a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Fix sink","assignee":"Bob"}`))
 	var added db.Task
 	json.Unmarshal([]byte(addResult), &added)
 
 	input, _ := json.Marshal(map[string]any{"id": added.ID, "status": "done"})
-	result, err := a.ExecuteTool("update_task", input)
+	result, err := a.ExecuteTool(testGroupID, "update_task", input)
 	if err != nil {
 		t.Fatalf("ExecuteTool update_task: %v", err)
 	}
@@ -302,12 +415,12 @@ func TestExecuteToolUpdateTask(t *testing.T) {
 func TestExecuteToolDeleteTask(t *testing.T) {
 	a := newTestAgent(t)
 
-	addResult, _ := a.ExecuteTool("add_task", []byte(`{"content":"Fix sink","assignee":"Bob"}`))
+	addResult, _ := a.ExecuteTool(testGroupID, "add_task", []byte(`{"content":"Fix sink","assignee":"Bob"}`))
 	var added db.Task
 	json.Unmarshal([]byte(addResult), &added)
 
 	input, _ := json.Marshal(map[string]any{"id": added.ID})
-	result, err := a.ExecuteTool("delete_task", input)
+	result, err := a.ExecuteTool(testGroupID, "delete_task", input)
 	if err != nil {
 		t.Fatalf("ExecuteTool delete_task: %v", err)
 	}
@@ -316,7 +429,7 @@ func TestExecuteToolDeleteTask(t *testing.T) {
 	}
 
 	// Verify it's gone
-	listResult, _ := a.ExecuteTool("list_tasks", []byte(`{}`))
+	listResult, _ := a.ExecuteTool(testGroupID, "list_tasks", []byte(`{}`))
 	if listResult != "null" && listResult != "[]" {
 		var tasks []db.Task
 		json.Unmarshal([]byte(listResult), &tasks)
@@ -329,7 +442,7 @@ func TestExecuteToolDeleteTask(t *testing.T) {
 func TestExecuteToolUnknown(t *testing.T) {
 	a := newTestAgent(t)
 
-	_, err := a.ExecuteTool("nonexistent", []byte(`{}`))
+	_, err := a.ExecuteTool(testGroupID, "nonexistent", []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for unknown tool")
 	}
@@ -338,7 +451,7 @@ func TestExecuteToolUnknown(t *testing.T) {
 func TestExecuteToolBadJSON(t *testing.T) {
 	a := newTestAgent(t)
 
-	_, err := a.ExecuteTool("add_task", []byte(`not json`))
+	_, err := a.ExecuteTool(testGroupID, "add_task", []byte(`not json`))
 	if err == nil {
 		t.Fatal("expected error for bad JSON input")
 	}
@@ -347,7 +460,7 @@ func TestExecuteToolBadJSON(t *testing.T) {
 // --- Version tests ---
 
 func TestVersionInSystemPrompt(t *testing.T) {
-	prompt := buildSystemPrompt()
+	prompt := buildSystemPrompt(nil, nil)
 	if !strings.Contains(prompt, "v"+version.Version) {
 		t.Errorf("system prompt missing version %q", version.Version)
 	}
@@ -467,7 +580,7 @@ func TestResolveMentionsEmptyPhones(t *testing.T) {
 // --- System prompt content tests ---
 
 func TestSystemPromptContainsDigestFormat(t *testing.T) {
-	prompt := buildSystemPrompt()
+	prompt := buildSystemPrompt(nil, nil)
 	if !strings.Contains(prompt, "Digest format") {
 		t.Error("system prompt missing digest format instructions")
 	}
@@ -477,7 +590,7 @@ func TestSystemPromptContainsDigestFormat(t *testing.T) {
 }
 
 func TestSystemPromptContainsToolRules(t *testing.T) {
-	prompt := buildSystemPrompt()
+	prompt := buildSystemPrompt(nil, nil)
 	if !strings.Contains(prompt, "Tool-use rules") {
 		t.Error("system prompt missing tool-use rules section")
 	}

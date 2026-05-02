@@ -67,29 +67,82 @@ Digest format (use when presenting all pending tasks as a digest):
 - Add a snarky parenthetical for overdue tasks.
 - Do NOT use markdown bold/headers — this is WhatsApp plain text.`
 
-func buildSystemPrompt() string {
-	tz := os.Getenv("TIMEZONE")
-	if tz == "" {
-		tz = "Asia/Jerusalem"
+// buildSystemPrompt renders the per-message system prompt. group/members
+// drive the per-tenant context (timezone, member names, language); merchant
+// context comes from env (it's about Israeli merchants, not per-group).
+//
+// If group is nil (dev terminal mode with no row), defaults are used so the
+// flow keeps working — language=en, timezone=TIMEZONE env or Asia/Jerusalem.
+func buildSystemPrompt(group *db.Group, members []db.Member) string {
+	tz := "Asia/Jerusalem"
+	if group != nil && group.Timezone != "" {
+		tz = group.Timezone
+	} else if env := os.Getenv("TIMEZONE"); env != "" {
+		tz = env
 	}
 	loc, _ := time.LoadLocation(tz)
 	now := time.Now().In(loc)
 
-	members := LoadPersonas()
+	memberLine := "(none configured)"
+	if len(members) > 0 {
+		var parts []string
+		for _, m := range members {
+			parts = append(parts, m.DisplayName)
+		}
+		memberLine = strings.Join(parts, ", ")
+	} else if raw := LoadPersonas(); raw != "" {
+		// Dev fallback: use personas.md content for tenant-zero color.
+		memberLine = raw
+	}
+
 	merchantCtx := os.Getenv("MERCHANT_CONTEXT")
 	if merchantCtx == "" {
 		merchantCtx = "(none configured)"
 	}
 
-	return fmt.Sprintf(systemPromptTemplate,
+	prompt := fmt.Sprintf(systemPromptTemplate,
 		version.Version,
 		version.DeployDate,
 		now.Format("2006-01-02 15:04 MST"),
 		now.Weekday().String(),
 		tz,
-		members,
+		memberLine,
 		merchantCtx,
 	)
+	if group != nil && group.Language == "he" {
+		prompt += "\n\nIMPORTANT: Reply ONLY in Hebrew. The persona, tone, and rules above all apply — but every word you emit (text replies, digest format) must be in Hebrew."
+	}
+	return prompt
+}
+
+// loadGroupContext returns the group row + members for the given JID. If the
+// row is missing (dev terminal mode), returns a synthesized fallback Group
+// with financial tools enabled so the dev workflow keeps the full tool set
+// while still exercising the per-message BuildTools path.
+func (a *Agent) loadGroupContext(ctx context.Context, groupID string) (*db.Group, []db.Member) {
+	if a.groups == nil {
+		return devFallbackGroup(groupID), nil
+	}
+	group, err := a.groups.Get(ctx, groupID)
+	if err != nil || group == nil {
+		return devFallbackGroup(groupID), nil
+	}
+	var members []db.Member
+	if a.members != nil {
+		members, _ = a.members.List(ctx, groupID)
+	}
+	return group, members
+}
+
+// devFallbackGroup synthesizes a Group for dev terminal mode (no row in DB).
+// FinancialEnabled is true so the dev workflow gets the full tool surface;
+// language defaults to en for English-only persona text.
+func devFallbackGroup(groupID string) *db.Group {
+	return &db.Group{
+		ID:               groupID,
+		Language:         "en",
+		FinancialEnabled: true,
+	}
 }
 
 func LoadPersonas() string {
@@ -187,159 +240,26 @@ type DashboardLinker interface {
 }
 
 type Agent struct {
-	client   anthropic.Client
-	store    *db.TaskStore
-	txStore  *db.TxStore     // optional: enables expense tools when non-nil
-	linker   DashboardLinker // optional: enables dashboard_link tool when non-nil
-	groupID  string          // tenant-zero JID until Epic 2's dispatcher injects per-message group_id
-	history  []anthropic.MessageParam
-	tools    []anthropic.ToolUnionParam
+	client  anthropic.Client
+	store   *db.TaskStore
+	txStore *db.TxStore     // optional: enables expense tools when non-nil
+	groups  *db.GroupStore  // per-message group lookup for prompt + tool gating
+	members *db.MemberStore // per-message member list for prompt context
+	linker  DashboardLinker // optional: enables dashboard_link tool when non-nil
+	history *History        // per-(group, agent_kind) conversation windows (D5)
 }
 
-// NewAgent constructs an agent with task and (optional) transaction stores
-// scoped to groupID. In v1 this is the tenant-zero JID, cached at startup
-// from WHATSAPP_GROUP_JID. Epic 2's dispatcher will replace this with a
-// per-message group_id derived from the inbound envelope.
-//
-// If txStore is nil, the expense tools are still registered but return an
-// "expenses not configured" error — this lets the system prompt stay constant
-// regardless of deployment configuration.
-func NewAgent(store *db.TaskStore, txStore *db.TxStore, groupID string) *Agent {
-	client := anthropic.NewClient()
-
-	tools := []anthropic.ToolUnionParam{
-		{OfTool: &anthropic.ToolParam{
-			Name:        "add_task",
-			Description: anthropic.String("Add a new task to the family backlog."),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: map[string]any{
-					"content":  map[string]any{"type": "string", "description": "What needs to be done"},
-					"assignee": map[string]any{"type": "string", "description": "Who should do it (Alice, Bob)"},
-					"due_date": map[string]any{"type": "string", "description": "Optional due date (YYYY-MM-DD)"},
-				},
-			},
-		}},
-		{OfTool: &anthropic.ToolParam{
-			Name:        "list_tasks",
-			Description: anthropic.String("List tasks, optionally filtered by assignee or status."),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: map[string]any{
-					"assignee": map[string]any{"type": "string", "description": "Filter by assignee (optional)"},
-					"status":   map[string]any{"type": "string", "description": "Filter by status: pending or done (optional)"},
-				},
-			},
-		}},
-		{OfTool: &anthropic.ToolParam{
-			Name:        "update_task",
-			Description: anthropic.String("Update a task's status and/or due date."),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: map[string]any{
-					"id":       map[string]any{"type": "integer", "description": "Task ID"},
-					"status":   map[string]any{"type": "string", "description": "New status: pending or done (optional)"},
-					"due_date": map[string]any{"type": "string", "description": "New due date YYYY-MM-DD (optional)"},
-				},
-			},
-		}},
-		{OfTool: &anthropic.ToolParam{
-			Name:        "delete_task",
-			Description: anthropic.String("Delete a task from the backlog."),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: map[string]any{
-					"id": map[string]any{"type": "integer", "description": "Task ID to delete"},
-				},
-			},
-		}},
-		{OfTool: &anthropic.ToolParam{
-			Name: "expenses_summary",
-			Description: anthropic.String(
-				"Aggregate credit card / bank expenses grouped by a dimension. " +
-					"Use for questions like 'how much did we spend this month', " +
-					"'top categories in February', 'top merchants this year', " +
-					"'how much did Alice spend vs Bob'. " +
-					"Amounts are in ILS. The response always includes total_spent_ils (the grand total " +
-					"across ALL rows, unaffected by the limit) — ALWAYS report this as the headline number. " +
-					"Each row's spent_ils is the NET outflow for that group. " +
-					"charges_ils is gross debits and refunds_ils is gross credits, for transparency only. " +
-					"Default date range is the CURRENT BILLING CYCLE if since/until are omitted " +
-					"(cycles run from BILLING_DAY of one month through the day before BILLING_DAY of the next).",
-			),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: map[string]any{
-					"group_by": map[string]any{
-						"type":        "string",
-						"enum":        []string{"category", "merchant", "month", "provider", "card_last4", "owner"},
-						"description": "Dimension to group by. 'owner' aggregates across each family member's cards (defined in personas.md).",
-					},
-					"since":             map[string]any{"type": "string", "description": "Start date (YYYY-MM-DD), inclusive. Optional."},
-					"until":             map[string]any{"type": "string", "description": "End date (YYYY-MM-DD), inclusive. Optional."},
-					"provider":          map[string]any{"type": "string", "description": "Filter by provider: 'cal' or 'max'. Optional."},
-					"category":          map[string]any{"type": "string", "description": "Exact category filter (e.g. 'מזון וצריכה'). Optional."},
-					"merchant_contains": map[string]any{"type": "string", "description": "Case-insensitive substring match on merchant description. Optional."},
-					"card_last4":        map[string]any{"type": "string", "description": "Filter to a single card by last 4 digits. Optional."},
-					"owner": map[string]any{
-						"type":        "string",
-						"description": "Filter to a single family member's cards (name as in personas.md, e.g. 'Alice' or 'Bob'). Optional.",
-					},
-					"limit": map[string]any{"type": "integer", "description": "Max groups to return (default 20, use 0 for unlimited)."},
-				},
-				Required: []string{"group_by"},
-			},
-		}},
-		{OfTool: &anthropic.ToolParam{
-			Name: "list_transactions",
-			Description: anthropic.String(
-				"List individual credit card / bank transactions matching a filter. " +
-					"Use for drilling into specific charges (e.g. 'what did we buy at Shufersal in Feb'). " +
-					"Amounts are in ILS, negative for debits. " +
-					"If since/until are omitted, defaults to the current billing cycle (same as expenses_summary). " +
-					"Always set a limit — this can return hundreds of rows otherwise.",
-			),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: map[string]any{
-					"since":             map[string]any{"type": "string", "description": "Start date (YYYY-MM-DD). Optional."},
-					"until":             map[string]any{"type": "string", "description": "End date (YYYY-MM-DD). Optional."},
-					"provider":          map[string]any{"type": "string", "description": "'cal' or 'max'. Optional."},
-					"category":          map[string]any{"type": "string", "description": "Exact category filter. Optional."},
-					"merchant_contains": map[string]any{"type": "string", "description": "Substring match on description. Optional."},
-					"card_last4":        map[string]any{"type": "string", "description": "Card last4. Optional."},
-					"owner":             map[string]any{"type": "string", "description": "Family member name — filters to their cards (e.g. 'Alice', 'Bob'). Optional."},
-					"debits_only":       map[string]any{"type": "boolean", "description": "If true, only debits (charges). Optional."},
-					"credits_only":      map[string]any{"type": "boolean", "description": "If true, only credits (refunds). Use for 'show me refunds'. Optional."},
-					"sort_by": map[string]any{
-						"type":        "string",
-						"enum":        []string{"date", "amount"},
-						"description": "Sort order: 'date' (default, newest first) or 'amount' (largest absolute amount first). Use 'amount' with debits_only=true for 'top/biggest/highest charges'.",
-					},
-					"limit":             map[string]any{"type": "integer", "description": "Max rows to return (default 50)."},
-				},
-			},
-		}},
-		{OfTool: &anthropic.ToolParam{
-			Name: "dashboard_link",
-			Description: anthropic.String(
-				"Generate a one-tap magic link to the web dashboard for the requesting user. " +
-					"The link includes a pre-generated OTP code so the user doesn't have to enter it. " +
-					"Use this when someone asks for 'the dashboard', 'the link', 'give me the dashboard', etc. " +
-					"The phone is resolved from the [Sender] prefix of the current message via personas.md.",
-			),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: map[string]any{
-					"for_user": map[string]any{
-						"type":        "string",
-						"description": "Family member name (must match personas.md). Usually the requesting user.",
-					},
-				},
-				Required: []string{"for_user"},
-			},
-		}},
-	}
-
+// NewAgent constructs the main task/expense agent. Conversation history,
+// system prompt, and tool surface are all rebuilt per inbound message from
+// the supplied group_id (D8, D10).
+func NewAgent(store *db.TaskStore, txStore *db.TxStore, groups *db.GroupStore, members *db.MemberStore, history *History) *Agent {
 	return &Agent{
-		client:  client,
+		client:  anthropic.NewClient(),
 		store:   store,
 		txStore: txStore,
-		groupID: groupID,
-		tools:   tools,
+		groups:  groups,
+		members: members,
+		history: history,
 	}
 }
 
@@ -351,27 +271,38 @@ func (a *Agent) SetDashboardLinker(linker DashboardLinker) {
 
 // maxHistoryMessages bounds the conversation window sent to Claude. Older
 // messages are dropped (respecting tool_use/tool_result pairing — see
-// trimHistory). This keeps token usage bounded on a long-running bot.
+// trimHistory). Applied per (group, agent_kind) key in History.
 const maxHistoryMessages = 20
 
-func (a *Agent) HandleMessage(sender, text string) (string, error) {
+// HandleMessage runs one user-turn through Claude for the given group and
+// returns the assistant's text reply. The conversation window is keyed by
+// (group_id, "main") in the shared History — no per-instance group state.
+//
+// Used directly by the digest scheduler (which wants the text to format and
+// send itself). The dispatcher wraps this in Handle() for the I/O-driven
+// per-message path.
+func (a *Agent) HandleMessage(ctx context.Context, groupID, sender, text string) (string, error) {
+	group, members := a.loadGroupContext(ctx, groupID)
+	tools := BuildTools(ctx, group, KindMain)
+	systemPrompt := buildSystemPrompt(group, members)
+
+	key := historyKey{GroupID: groupID, AgentKind: KindMain}
 	userContent := fmt.Sprintf("[%s]: %s", sender, text)
-	a.history = append(a.history, anthropic.NewUserMessage(anthropic.NewTextBlock(userContent)))
-	a.history = trimHistory(a.history, maxHistoryMessages)
+	window := a.history.Append(key, anthropic.NewUserMessage(anthropic.NewTextBlock(userContent)))
 
 	for {
-		message, err := a.client.Messages.New(context.Background(), anthropic.MessageNewParams{
+		message, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     "claude-haiku-4-5-20251001",
 			MaxTokens: 1024,
-			System:    []anthropic.TextBlockParam{{Text: buildSystemPrompt()}},
-			Messages:  a.history,
-			Tools:     a.tools,
+			System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
+			Messages:  window,
+			Tools:     tools,
 		})
 		if err != nil {
 			return "", fmt.Errorf("claude api: %w", err)
 		}
 
-		a.history = append(a.history, message.ToParam())
+		window = a.history.Append(key, message.ToParam())
 
 		var textParts []string
 		var toolResults []anthropic.ContentBlockParamUnion
@@ -381,7 +312,7 @@ func (a *Agent) HandleMessage(sender, text string) (string, error) {
 			case anthropic.TextBlock:
 				textParts = append(textParts, variant.Text)
 			case anthropic.ToolUseBlock:
-				result, toolErr := a.ExecuteTool(variant.Name, []byte(variant.JSON.Input.Raw()))
+				result, toolErr := a.ExecuteTool(groupID, variant.Name, []byte(variant.JSON.Input.Raw()))
 				if toolErr != nil {
 					toolResults = append(toolResults, anthropic.NewToolResultBlock(variant.ID, toolErr.Error(), true))
 				} else {
@@ -394,7 +325,7 @@ func (a *Agent) HandleMessage(sender, text string) (string, error) {
 			return strings.Join(textParts, "\n"), nil
 		}
 
-		a.history = append(a.history, anthropic.NewUserMessage(toolResults...))
+		window = a.history.Append(key, anthropic.NewUserMessage(toolResults...))
 	}
 }
 
@@ -419,7 +350,7 @@ func ResolveMentions(text string) (string, []messenger.Mention) {
 	return resolveMentionsWithPhones(text, ParsePersonaPhones(LoadPersonas()))
 }
 
-func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
+func (a *Agent) ExecuteTool(groupID, name string, inputJSON []byte) (string, error) {
 	switch name {
 	case "add_task":
 		var input struct {
@@ -430,7 +361,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
-		task, err := a.store.AddTask(a.groupID, input.Content, input.Assignee, input.DueDate)
+		task, err := a.store.AddTask(groupID, input.Content, input.Assignee, input.DueDate)
 		if err != nil {
 			return "", err
 		}
@@ -445,7 +376,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
-		tasks, err := a.store.ListTasks(a.groupID, input.Assignee, input.Status)
+		tasks, err := a.store.ListTasks(groupID, input.Assignee, input.Status)
 		if err != nil {
 			return "", err
 		}
@@ -454,14 +385,44 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 
 	case "update_task":
 		var input struct {
-			ID      int64  `json:"id"`
-			Status  string `json:"status"`
-			DueDate string `json:"due_date"`
+			ID       int64  `json:"id"`
+			Status   string `json:"status"`
+			DueDate  string `json:"due_date"`
+			Content  string `json:"content"`
+			Assignee string `json:"assignee"`
 		}
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
-		task, err := a.store.UpdateTask(a.groupID, input.ID, input.Status, input.DueDate)
+		fields := db.TaskUpdate{
+			Status:   input.Status,
+			DueDate:  input.DueDate,
+			Content:  input.Content,
+			Assignee: input.Assignee,
+		}
+		if fields.IsEmpty() {
+			return "", fmt.Errorf("no fields provided — pass at least one of: status, due_date, content, assignee")
+		}
+		// Validate assignee against the group's member roster (display names).
+		if fields.Assignee != "" && a.members != nil {
+			ms, mErr := a.members.List(context.Background(), groupID)
+			if mErr == nil && len(ms) > 0 {
+				ok := false
+				var known []string
+				for _, m := range ms {
+					if m.DisplayName != "" {
+						known = append(known, m.DisplayName)
+					}
+					if m.DisplayName == fields.Assignee {
+						ok = true
+					}
+				}
+				if !ok {
+					return "", fmt.Errorf("unknown assignee %q — current members: %s", fields.Assignee, strings.Join(known, ", "))
+				}
+			}
+		}
+		task, err := a.store.UpdateTask(groupID, input.ID, fields)
 		if err != nil {
 			return "", err
 		}
@@ -475,7 +436,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
-		if err := a.store.DeleteTask(a.groupID, input.ID); err != nil {
+		if err := a.store.DeleteTask(groupID, input.ID); err != nil {
 			return "", err
 		}
 		return `{"deleted": true}`, nil
@@ -540,7 +501,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 				}
 				f.Cards = cards
 				f.Limit = 0
-				total, err := a.txStore.TotalSpent(a.groupID, f)
+				total, err := a.txStore.TotalSpent(groupID, f)
 				if err != nil {
 					return "", err
 				}
@@ -553,7 +514,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			}
 		} else {
 			var err error
-			rows, err = a.txStore.SumBy(a.groupID, input.GroupBy, baseFilter)
+			rows, err = a.txStore.SumBy(groupID, input.GroupBy, baseFilter)
 			if err != nil {
 				return "", err
 			}
@@ -561,7 +522,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 
 		// Always include the overall total so the LLM doesn't need to sum rows
 		// (which may be truncated by the limit).
-		total, _ := a.txStore.TotalSpent(a.groupID, db.TxFilter{
+		total, _ := a.txStore.TotalSpent(groupID, db.TxFilter{
 			Since:    since,
 			Until:    until,
 			Provider: input.Provider,
@@ -619,7 +580,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			}
 			filterCards = cards
 		}
-		txs, err := a.txStore.QueryTransactions(a.groupID, db.TxFilter{
+		txs, err := a.txStore.QueryTransactions(groupID, db.TxFilter{
 			Since:            since,
 			Until:            until,
 			Provider:         input.Provider,
@@ -675,9 +636,235 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		})
 		return string(b), nil
 
+	case "get_group_settings":
+		return a.toolGetGroupSettings(groupID)
+	case "update_group_settings":
+		return a.toolUpdateGroupSettings(groupID, inputJSON)
+	case "add_member":
+		return a.toolAddMember(groupID, inputJSON)
+	case "update_member":
+		return a.toolUpdateMember(groupID, inputJSON)
+	case "remove_member":
+		return a.toolRemoveMember(groupID, inputJSON)
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+// toolGetGroupSettings returns the user-visible group config + member list.
+// Operator-only fields (financial_enabled, onboarding_state, last_active_at)
+// are intentionally omitted (NFR1 — no operator back-door through the agent).
+func (a *Agent) toolGetGroupSettings(groupID string) (string, error) {
+	ctx := context.Background()
+	if a.groups == nil {
+		return "", fmt.Errorf("group settings not available in this deployment")
+	}
+	group, err := a.groups.Get(ctx, groupID)
+	if err != nil {
+		return "", err
+	}
+	if group == nil {
+		return "", fmt.Errorf("no group settings for %s", groupID)
+	}
+	var members []db.Member
+	if a.members != nil {
+		members, _ = a.members.List(ctx, groupID)
+	}
+	type memberOut struct {
+		Name       string `json:"display_name"`
+		WhatsAppID string `json:"whatsapp_id"`
+	}
+	out := struct {
+		Name       string      `json:"name"`
+		Language   string      `json:"language"`
+		Timezone   string      `json:"timezone"`
+		DigestHour any         `json:"digest_hour"`
+		Members    []memberOut `json:"members"`
+	}{
+		Name:     group.Name,
+		Language: group.Language,
+		Timezone: group.Timezone,
+	}
+	if group.DigestHourSet {
+		out.DigestHour = group.DigestHour
+	}
+	for _, m := range members {
+		out.Members = append(out.Members, memberOut{Name: m.DisplayName, WhatsAppID: m.WhatsAppID})
+	}
+	b, _ := json.Marshal(out)
+	return string(b), nil
+}
+
+func (a *Agent) toolUpdateGroupSettings(groupID string, inputJSON []byte) (string, error) {
+	var input struct {
+		Name       *string `json:"name"`
+		Timezone   *string `json:"timezone"`
+		DigestHour *int    `json:"digest_hour"`
+	}
+	if err := json.Unmarshal(inputJSON, &input); err != nil {
+		return "", fmt.Errorf("parse input: %w", err)
+	}
+	if input.Name == nil && input.Timezone == nil && input.DigestHour == nil {
+		return "", fmt.Errorf("no fields provided — pass at least one of: name, timezone, digest_hour")
+	}
+	ctx := context.Background()
+	if input.Timezone != nil {
+		if _, err := time.LoadLocation(*input.Timezone); err != nil {
+			return "", fmt.Errorf("invalid IANA timezone %q", *input.Timezone)
+		}
+		if err := a.groups.SetTimezone(ctx, groupID, *input.Timezone); err != nil {
+			return "", err
+		}
+	}
+	if input.DigestHour != nil {
+		if *input.DigestHour < 0 || *input.DigestHour > 23 {
+			return "", fmt.Errorf("digest_hour must be 0..23, got %d", *input.DigestHour)
+		}
+		if err := a.groups.SetDigestHour(ctx, groupID, *input.DigestHour); err != nil {
+			return "", err
+		}
+	}
+	if input.Name != nil {
+		if err := a.groups.SetName(ctx, groupID, *input.Name); err != nil {
+			return "", err
+		}
+	}
+	return a.toolGetGroupSettings(groupID)
+}
+
+func (a *Agent) toolAddMember(groupID string, inputJSON []byte) (string, error) {
+	var input struct {
+		Name       string `json:"name"`
+		WhatsAppID string `json:"whatsapp_id"`
+	}
+	if err := json.Unmarshal(inputJSON, &input); err != nil {
+		return "", fmt.Errorf("parse input: %w", err)
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	input.WhatsAppID = strings.TrimSpace(input.WhatsAppID)
+	if input.Name == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	if !phoneRe.MatchString(input.WhatsAppID) {
+		return "", fmt.Errorf("whatsapp_id must be digits only in international format (no `+`), got %q", input.WhatsAppID)
+	}
+	ctx := context.Background()
+	current, err := a.members.List(ctx, groupID)
+	if err != nil {
+		return "", err
+	}
+	if len(current) >= db.MemberCap {
+		return "", fmt.Errorf("group already has %d members; v1 supports up to %d per group", len(current), db.MemberCap)
+	}
+	if err := a.members.Add(ctx, groupID, db.Member{
+		GroupID: groupID, WhatsAppID: input.WhatsAppID, DisplayName: input.Name,
+	}); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`{"name": %q, "whatsapp_id": %q, "members_count": %d}`,
+		input.Name, input.WhatsAppID, len(current)+1), nil
+}
+
+func (a *Agent) toolUpdateMember(groupID string, inputJSON []byte) (string, error) {
+	var input struct {
+		WhatsAppID  string `json:"whatsapp_id"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.Unmarshal(inputJSON, &input); err != nil {
+		return "", fmt.Errorf("parse input: %w", err)
+	}
+	input.WhatsAppID = strings.TrimSpace(input.WhatsAppID)
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	if input.WhatsAppID == "" || input.DisplayName == "" {
+		return "", fmt.Errorf("both whatsapp_id and display_name are required")
+	}
+	ctx := context.Background()
+	current, err := a.members.List(ctx, groupID)
+	if err != nil {
+		return "", err
+	}
+	var oldName string
+	for _, m := range current {
+		if m.WhatsAppID == input.WhatsAppID {
+			oldName = m.DisplayName
+			break
+		}
+	}
+	if oldName == "" && !memberExists(current, input.WhatsAppID) {
+		return "", fmt.Errorf("member %s not found in this group", input.WhatsAppID)
+	}
+	if err := a.members.UpdateName(ctx, groupID, input.WhatsAppID, input.DisplayName); err != nil {
+		return "", err
+	}
+	// Cascade: rename pending tasks assigned to the old display_name. Done
+	// tasks keep history. Skip if oldName is empty (was previously unnamed).
+	var reassigned int64
+	if oldName != "" && oldName != input.DisplayName {
+		reassigned, _ = a.store.ReassignPending(groupID, oldName, input.DisplayName)
+	}
+	return fmt.Sprintf(`{"whatsapp_id": %q, "display_name": %q, "tasks_reassigned": %d}`,
+		input.WhatsAppID, input.DisplayName, reassigned), nil
+}
+
+func (a *Agent) toolRemoveMember(groupID string, inputJSON []byte) (string, error) {
+	var input struct {
+		WhatsAppID string `json:"whatsapp_id"`
+	}
+	if err := json.Unmarshal(inputJSON, &input); err != nil {
+		return "", fmt.Errorf("parse input: %w", err)
+	}
+	input.WhatsAppID = strings.TrimSpace(input.WhatsAppID)
+	if input.WhatsAppID == "" {
+		return "", fmt.Errorf("whatsapp_id is required")
+	}
+	ctx := context.Background()
+	current, err := a.members.List(ctx, groupID)
+	if err != nil {
+		return "", err
+	}
+	var (
+		targetName    string
+		remainingName string
+		found         bool
+	)
+	for _, m := range current {
+		if m.WhatsAppID == input.WhatsAppID {
+			found = true
+			targetName = m.DisplayName
+		} else {
+			// Keep the first non-target name as the reassign destination.
+			if remainingName == "" {
+				remainingName = m.DisplayName
+			}
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("member %s not found in this group", input.WhatsAppID)
+	}
+	if len(current) <= 1 {
+		return "", fmt.Errorf("cannot remove the only member — at least one must remain")
+	}
+	// Reassign open tasks first, then remove. Worst case (reassign succeeds,
+	// remove fails) leaves an inconsistent but recoverable state.
+	var reassigned int64
+	if targetName != "" && remainingName != "" {
+		reassigned, _ = a.store.ReassignPending(groupID, targetName, remainingName)
+	}
+	if err := a.members.Remove(ctx, groupID, input.WhatsAppID); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`{"removed": %q, "tasks_reassigned_to": %q, "tasks_reassigned": %d}`,
+		input.WhatsAppID, remainingName, reassigned), nil
+}
+
+func memberExists(members []db.Member, whatsappID string) bool {
+	for _, m := range members {
+		if m.WhatsAppID == whatsappID {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultBillingCycleRange returns the caller's since/until if both are

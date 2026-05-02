@@ -2,6 +2,10 @@
 tasks.db
 tasks.db-wal
 tasks.db-shm
+tasks.db.bak.*
+tasks.db.prod.bak.*
+tasks.db.prod.postmig.*
+prod-snapshot-*/
 whatsapp_session.db
 whatsapp_session.db-wal
 whatsapp_session.db-shm

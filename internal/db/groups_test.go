@@ -408,6 +408,182 @@ func TestMemberStoreListEmpty(t *testing.T) {
 	}
 }
 
+func TestGroupStoreAutoCreate(t *testing.T) {
+	dbPath := setupMigratedDB(t)
+	groupStore, err := NewGroupStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewGroupStore: %v", err)
+	}
+	defer groupStore.Close()
+	memberStore, _ := NewMemberStore(dbPath)
+	defer memberStore.Close()
+
+	ctx := context.Background()
+	jid := "120363777777@g.us"
+	if err := groupStore.AutoCreate(ctx, jid, "Friend group", []string{"100000000001", "100000000002"}); err != nil {
+		t.Fatalf("AutoCreate: %v", err)
+	}
+
+	got, err := groupStore.Get(ctx, jid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected group, got nil")
+	}
+	if got.OnboardingState != "in_progress" {
+		t.Errorf("OnboardingState: got %q, want in_progress", got.OnboardingState)
+	}
+	if got.FinancialEnabled {
+		t.Error("FinancialEnabled: should default to false on auto-create")
+	}
+	if got.Language != "" {
+		t.Errorf("Language: should be NULL on auto-create, got %q", got.Language)
+	}
+	if got.Name != "Friend group" {
+		t.Errorf("Name: got %q", got.Name)
+	}
+
+	members, _ := memberStore.List(ctx, jid)
+	if len(members) != 2 {
+		t.Fatalf("expected 2 members, got %d", len(members))
+	}
+}
+
+func TestGroupStoreAutoCreateCapsAtTwoMembers(t *testing.T) {
+	dbPath := setupMigratedDB(t)
+	groupStore, _ := NewGroupStore(dbPath)
+	defer groupStore.Close()
+	memberStore, _ := NewMemberStore(dbPath)
+	defer memberStore.Close()
+
+	ctx := context.Background()
+	jid := "120363888888@g.us"
+	if err := groupStore.AutoCreate(ctx, jid, "Crowd", []string{
+		"100000000001", "100000000002", "100000000003", "100000000004",
+	}); err != nil {
+		t.Fatalf("AutoCreate: %v", err)
+	}
+	members, _ := memberStore.List(ctx, jid)
+	if len(members) != MemberCap {
+		t.Errorf("expected %d members (cap), got %d", MemberCap, len(members))
+	}
+}
+
+func TestGroupStoreAutoCreateZeroMembersStillCreatesGroup(t *testing.T) {
+	dbPath := setupMigratedDB(t)
+	groupStore, _ := NewGroupStore(dbPath)
+	defer groupStore.Close()
+
+	ctx := context.Background()
+	jid := "120363ABABAB@g.us"
+	if err := groupStore.AutoCreate(ctx, jid, "", nil); err != nil {
+		t.Fatalf("AutoCreate: %v", err)
+	}
+	got, _ := groupStore.Get(ctx, jid)
+	if got == nil {
+		t.Fatal("expected group row")
+	}
+	if got.OnboardingState != "in_progress" {
+		t.Errorf("OnboardingState: got %q", got.OnboardingState)
+	}
+}
+
+func TestGroupStoreListComplete(t *testing.T) {
+	dbPath := setupMigratedDB(t)
+	gs, _ := NewGroupStore(dbPath)
+	defer gs.Close()
+
+	ctx := context.Background()
+	// Two complete, one in-progress, one with no state.
+	gs.Create(ctx, Group{ID: "120363LIST01@g.us", OnboardingState: "complete", Timezone: "Asia/Jerusalem", DigestHour: 9, DigestHourSet: true})
+	gs.Create(ctx, Group{ID: "120363LIST02@g.us", OnboardingState: "complete", Timezone: "Europe/Berlin", DigestHour: 8, DigestHourSet: true})
+	gs.Create(ctx, Group{ID: "120363LIST03@g.us", OnboardingState: "in_progress"})
+
+	got, err := gs.ListComplete(ctx)
+	if err != nil {
+		t.Fatalf("ListComplete: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("ListComplete: got %d groups, want 2 (in_progress should be excluded)", len(got))
+	}
+	for _, g := range got {
+		if g.OnboardingState != "complete" {
+			t.Errorf("returned non-complete group: %+v", g)
+		}
+	}
+}
+
+func TestMemberStoreUpdateName(t *testing.T) {
+	dbPath := setupMigratedDB(t)
+	gs, _ := NewGroupStore(dbPath)
+	defer gs.Close()
+	ms, _ := NewMemberStore(dbPath)
+	defer ms.Close()
+
+	ctx := context.Background()
+	jid := "120363UPDATE01@g.us"
+	gs.Create(ctx, Group{ID: jid, OnboardingState: "complete"})
+	ms.Add(ctx, jid, Member{GroupID: jid, WhatsAppID: "100000000001", DisplayName: "Alice"})
+
+	if err := ms.UpdateName(ctx, jid, "100000000001", "Alicia"); err != nil {
+		t.Fatalf("UpdateName: %v", err)
+	}
+	got, _ := ms.List(ctx, jid)
+	if got[0].DisplayName != "Alicia" {
+		t.Errorf("DisplayName: got %q, want Alicia", got[0].DisplayName)
+	}
+}
+
+func TestMemberStoreUpdateNameMissingFails(t *testing.T) {
+	dbPath := setupMigratedDB(t)
+	ms, _ := NewMemberStore(dbPath)
+	defer ms.Close()
+
+	if err := ms.UpdateName(context.Background(), "120363NOPE@g.us", "100000000001", "Ghost"); err == nil {
+		t.Error("expected error for missing member")
+	}
+}
+
+func TestMemberStoreRemove(t *testing.T) {
+	dbPath := setupMigratedDB(t)
+	gs, _ := NewGroupStore(dbPath)
+	defer gs.Close()
+	ms, _ := NewMemberStore(dbPath)
+	defer ms.Close()
+
+	ctx := context.Background()
+	jid := "120363REMOVE01@g.us"
+	gs.Create(ctx, Group{ID: jid, OnboardingState: "complete"})
+	ms.Add(ctx, jid, Member{GroupID: jid, WhatsAppID: "100000000001", DisplayName: "Alice"})
+	ms.Add(ctx, jid, Member{GroupID: jid, WhatsAppID: "100000000002", DisplayName: "Bob"})
+
+	if err := ms.Remove(ctx, jid, "100000000001"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	mems, _ := ms.List(ctx, jid)
+	if len(mems) != 1 || mems[0].DisplayName != "Bob" {
+		t.Errorf("after remove: got %+v, want [Bob]", mems)
+	}
+}
+
+func TestGroupStoreSetName(t *testing.T) {
+	dbPath := setupMigratedDB(t)
+	gs, _ := NewGroupStore(dbPath)
+	defer gs.Close()
+
+	ctx := context.Background()
+	jid := "120363NAME01@g.us"
+	gs.Create(ctx, Group{ID: jid, OnboardingState: "complete", Name: "Old"})
+	if err := gs.SetName(ctx, jid, "New Family"); err != nil {
+		t.Fatalf("SetName: %v", err)
+	}
+	got, _ := gs.Get(ctx, jid)
+	if got.Name != "New Family" {
+		t.Errorf("Name: got %q, want New Family", got.Name)
+	}
+}
+
 func TestMemberStoreScopedByGroup(t *testing.T) {
 	dbPath := setupMigratedDB(t)
 	groupStore, _ := NewGroupStore(dbPath)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,18 +18,29 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/lizozom/whatsapp-nagger/internal/db"
 )
+
+// groupInfoFn returns the international-format-no-`+` phone numbers of every
+// participant in the given group JID, plus the group's display name.
+// Abstracted as a function pointer so tests can stub it without going through
+// whatsmeow's network call.
+type groupInfoFn func(ctx context.Context, jid types.JID) (phones []string, name string, err error)
 
 type WhatsApp struct {
 	client        *whatsmeow.Client
-	tenantZeroJID types.JID // v1 single-tenant inbound filter; replaced by allowlist in Story 2.1
+	tenantZeroJID types.JID // discovery / pairing target only; runtime gating no longer special-cases this JID
+	allowlist     *Allowlist
+	groups        *db.GroupStore
+	groupInfo     groupInfoFn // test seam — defaults to wa.fetchGroupInfo
 	incoming      chan Message
 	discovery     bool
 	paired        bool
 	pairCode      string // 8-digit pairing code for web display
 }
 
-func NewWhatsApp(dbPath string, tenantZeroJID string) (*WhatsApp, error) {
+func NewWhatsApp(dbPath string, tenantZeroJID string, allowlist *Allowlist, groups *db.GroupStore) (*WhatsApp, error) {
 	var gJID types.JID
 	discovery := tenantZeroJID == ""
 	if !discovery {
@@ -70,10 +82,13 @@ func NewWhatsApp(dbPath string, tenantZeroJID string) (*WhatsApp, error) {
 	wa := &WhatsApp{
 		client:        client,
 		tenantZeroJID: gJID,
+		allowlist:     allowlist,
+		groups:        groups,
 		incoming:      make(chan Message, 64),
 		discovery:     discovery,
 		paired:        client.Store.ID != nil,
 	}
+	wa.groupInfo = wa.fetchGroupInfo
 
 	if discovery {
 		fmt.Fprintln(os.Stderr, "Discovery mode: no WHATSAPP_GROUP_JID set. Will print all group messages with JIDs.")
@@ -181,10 +196,6 @@ func (wa *WhatsApp) handleEvent(evt interface{}) {
 			return
 		}
 
-		if chat.String() != wa.tenantZeroJID.String() {
-			return
-		}
-
 		text := extractText(v.Message)
 		if text == "" {
 			return
@@ -195,9 +206,113 @@ func (wa *WhatsApp) handleEvent(evt interface{}) {
 			sender = v.Info.Sender.User
 		}
 
+		// Allowlist + auto-create gating (Story 2.1). Returns true only for
+		// tenant-zero groups; non-tenant-zero allowlisted messages are silently
+		// consumed pending Story 2.2's dispatcher.
+		if !wa.gateInbound(context.Background(), chat) {
+			return
+		}
+
 		fmt.Fprintf(os.Stderr, "[MSG] %s: %s\n", sender, text)
 		wa.incoming <- Message{GroupID: chat.String(), Sender: sender, Text: text}
+
+	case *events.GroupInfo:
+		// Bot kicked / removed from a group → no-op (D17). The groups row,
+		// members, tasks, and conversation history are all preserved so a
+		// later re-add resumes seamlessly via Story 2.1's auto-create skip
+		// (existing row → no AutoCreate, dispatcher routes by state).
+		if wa.client.Store.ID == nil {
+			return
+		}
+		if isBotLeaving(v.Leave, *wa.client.Store.ID) {
+			slog.Info("bot removed from group",
+				slog.String("group_id", v.JID.String()))
+		}
 	}
+}
+
+// isBotLeaving reports whether the bot's JID appears in the Leave list of a
+// GroupInfo event. Pure function for testability — handles ID/AD-suffix
+// normalization via ToNonAD so device-suffix variants compare correctly.
+func isBotLeaving(leavers []types.JID, botJID types.JID) bool {
+	bot := botJID.ToNonAD().String()
+	for _, j := range leavers {
+		if j.ToNonAD().String() == bot {
+			return true
+		}
+	}
+	return false
+}
+
+// gateInbound applies allowlist gating + group auto-create, then delivers
+// every allowlisted message to the main loop. The dispatcher (Story 2.2)
+// downstream routes by groups.onboarding_state. Returns false only for
+// groups with no allowlisted participants — those are dropped silently
+// with no DB writes, no agent invocation, no presence change.
+//
+// Every allowlisted group is treated identically: if a groups row exists,
+// reuse it; otherwise auto-create. The legacy "tenant-zero" group has no
+// runtime special-case — its row exists because the migration backfill
+// created it, just like a friend group's row exists because AutoCreate did.
+func (wa *WhatsApp) gateInbound(ctx context.Context, chat types.JID) bool {
+	phones, name, err := wa.groupInfo(ctx, chat)
+	if err != nil {
+		// Fail closed — without a participant list we can't prove the group
+		// has an allowlisted member, so we treat it as non-allowlisted.
+		slog.Info("dropped inbound (group info lookup failed)",
+			slog.String("group_id", "<dropped>"),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+
+	allowed := wa.allowlist.FilterAllowed(phones)
+	if len(allowed) == 0 {
+		slog.Info("dropped inbound (no allowlisted participants)",
+			slog.String("group_id", "<dropped>"),
+		)
+		return false
+	}
+
+	jid := chat.String()
+
+	if wa.groups != nil {
+		row, err := wa.groups.Get(ctx, jid)
+		if err != nil {
+			slog.Error("groups.Get failed", slog.String("group_id", jid), slog.String("error", err.Error()))
+			return false
+		}
+		if row == nil {
+			if err := wa.groups.AutoCreate(ctx, jid, name, allowed); err != nil {
+				slog.Error("groups.AutoCreate failed", slog.String("group_id", jid), slog.String("error", err.Error()))
+				return false
+			}
+			slog.Info("auto-created group", slog.String("group_id", jid), slog.String("name", name))
+		}
+	}
+
+	return true
+}
+
+// fetchGroupInfo resolves the participants' international-format phones plus
+// the group's display name via whatsmeow's GetGroupInfo. PhoneNumber is
+// preferred over JID because newer WhatsApp deployments expose participants
+// as LIDs in the JID field — PhoneNumber holds the actual phone.
+func (wa *WhatsApp) fetchGroupInfo(ctx context.Context, jid types.JID) ([]string, string, error) {
+	info, err := wa.client.GetGroupInfo(ctx, jid)
+	if err != nil {
+		return nil, "", err
+	}
+	phones := make([]string, 0, len(info.Participants))
+	for _, p := range info.Participants {
+		switch {
+		case p.PhoneNumber.User != "":
+			phones = append(phones, p.PhoneNumber.User)
+		case p.JID.Server == types.DefaultUserServer && p.JID.User != "":
+			phones = append(phones, p.JID.User)
+		}
+	}
+	return phones, info.Name, nil
 }
 
 func extractText(msg *waE2E.Message) string {

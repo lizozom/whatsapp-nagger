@@ -14,7 +14,8 @@ type Group struct {
 	Name             string
 	Language         string // "" if NULL — e.g. mid-onboarding before set_language
 	Timezone         string
-	DigestHour       int    // 0 if NULL
+	DigestHour       int  // 0 if NULL — see DigestHourSet to disambiguate
+	DigestHourSet    bool // true iff the column is non-NULL (0 is a valid hour)
 	OnboardingState  string // "in_progress" or "complete"
 	FinancialEnabled bool
 	CreatedAt        string
@@ -75,6 +76,7 @@ func (s *GroupStore) Get(ctx context.Context, groupID string) (*Group, error) {
 	g.Timezone = timezone.String
 	if digestHour.Valid {
 		g.DigestHour = int(digestHour.Int64)
+		g.DigestHourSet = true
 	}
 	g.OnboardingState = onboarding.String
 	g.LastActiveAt = lastActive.String
@@ -112,6 +114,133 @@ func (s *GroupStore) UpdateLastActive(ctx context.Context, groupID string) error
 	)
 	if err != nil {
 		return fmt.Errorf("update last_active_at for %s: %w", groupID, err)
+	}
+	return nil
+}
+
+// MemberCap is the per-group member maximum (NFR3). Enforced by AutoCreate
+// (which silently truncates) and by the future add_member tool (which refuses).
+const MemberCap = 2
+
+// AutoCreate inserts a fresh groups row in onboarding state plus member
+// rows for the supplied allowlisted phones, transactionally. The members
+// list is truncated to MemberCap (NFR3 — extras are ignored at this layer;
+// add_member will surface the cap as a refusal in Story 2.6).
+//
+// language/timezone/digest_hour are NULL — onboarding fills them in.
+// financial_enabled is 0 — flipping it is operator-only (DB direct, no tool/chat path).
+func (s *GroupStore) AutoCreate(ctx context.Context, groupID, name string, allowlistedPhones []string) error {
+	if len(allowlistedPhones) > MemberCap {
+		allowlistedPhones = allowlistedPhones[:MemberCap]
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO groups (id, name, language, timezone, digest_hour,
+		                    onboarding_state, financial_enabled, created_at, last_active_at)
+		VALUES (?, NULLIF(?, ''), NULL, NULL, NULL, 'in_progress', 0, ?, ?)`,
+		groupID, name, now, now,
+	); err != nil {
+		return fmt.Errorf("insert group %s: %w", groupID, err)
+	}
+
+	for _, phone := range allowlistedPhones {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO members (group_id, whatsapp_id, display_name, created_at)
+			VALUES (?, ?, NULL, ?)`,
+			groupID, phone, now,
+		); err != nil {
+			return fmt.Errorf("insert member %s/%s: %w", groupID, phone, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit auto-create %s: %w", groupID, err)
+	}
+	return nil
+}
+
+// ListComplete returns all groups whose onboarding_state = "complete". Used
+// by the digest + nag schedulers to iterate live tenants (D14). Mid-onboarding
+// groups are excluded — they have no language/timezone/digest_hour yet.
+func (s *GroupStore) ListComplete(ctx context.Context) ([]Group, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, language, timezone, digest_hour,
+		       onboarding_state, financial_enabled, created_at, last_active_at
+		FROM groups WHERE onboarding_state = 'complete'`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list complete groups: %w", err)
+	}
+	defer rows.Close()
+	var out []Group
+	for rows.Next() {
+		var (
+			g          Group
+			name       sql.NullString
+			language   sql.NullString
+			timezone   sql.NullString
+			digestHour sql.NullInt64
+			onboarding sql.NullString
+			lastActive sql.NullString
+		)
+		if err := rows.Scan(&g.ID, &name, &language, &timezone, &digestHour,
+			&onboarding, &g.FinancialEnabled, &g.CreatedAt, &lastActive); err != nil {
+			return nil, fmt.Errorf("scan group: %w", err)
+		}
+		g.Name = name.String
+		g.Language = language.String
+		g.Timezone = timezone.String
+		if digestHour.Valid {
+			g.DigestHour = int(digestHour.Int64)
+			g.DigestHourSet = true
+		}
+		g.OnboardingState = onboarding.String
+		g.LastActiveAt = lastActive.String
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// SetName writes groups.name. Called by the update_group_settings tool.
+func (s *GroupStore) SetName(ctx context.Context, groupID, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE groups SET name = NULLIF(?, '') WHERE id = ?`, name, groupID)
+	if err != nil {
+		return fmt.Errorf("set name for %s: %w", groupID, err)
+	}
+	return nil
+}
+
+// SetLanguage writes groups.language. Called only by the onboarding agent's
+// set_language tool (language is locked at first set per NFR4).
+func (s *GroupStore) SetLanguage(ctx context.Context, groupID, language string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE groups SET language = ? WHERE id = ?`, language, groupID)
+	if err != nil {
+		return fmt.Errorf("set language for %s: %w", groupID, err)
+	}
+	return nil
+}
+
+// SetTimezone writes groups.timezone. Caller must have validated the IANA name.
+func (s *GroupStore) SetTimezone(ctx context.Context, groupID, timezone string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE groups SET timezone = ? WHERE id = ?`, timezone, groupID)
+	if err != nil {
+		return fmt.Errorf("set timezone for %s: %w", groupID, err)
+	}
+	return nil
+}
+
+// SetDigestHour writes groups.digest_hour (0..23). Caller validates the range.
+func (s *GroupStore) SetDigestHour(ctx context.Context, groupID string, hour int) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE groups SET digest_hour = ? WHERE id = ?`, hour, groupID)
+	if err != nil {
+		return fmt.Errorf("set digest_hour for %s: %w", groupID, err)
 	}
 	return nil
 }
@@ -166,6 +295,60 @@ func (s *MemberStore) List(ctx context.Context, groupID string) ([]Member, error
 		ms = append(ms, m)
 	}
 	return ms, rows.Err()
+}
+
+// Upsert inserts or updates a member row by (group_id, whatsapp_id). Used
+// by the onboarding set_member tool to allow correcting names mid-flow.
+// Caller is responsible for enforcing the per-group MemberCap.
+func (s *MemberStore) Upsert(ctx context.Context, groupID string, m Member) error {
+	if m.CreatedAt == "" {
+		m.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO members (group_id, whatsapp_id, display_name, created_at)
+		VALUES (?, ?, NULLIF(?, ''), ?)
+		ON CONFLICT (group_id, whatsapp_id) DO UPDATE SET display_name = excluded.display_name`,
+		groupID, m.WhatsAppID, m.DisplayName, m.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert member %s/%s: %w", groupID, m.WhatsAppID, err)
+	}
+	return nil
+}
+
+// UpdateName changes a member's display_name. Returns an error if the row
+// doesn't exist. Caller is responsible for cascading to tasks.assignee.
+func (s *MemberStore) UpdateName(ctx context.Context, groupID, whatsappID, newName string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE members SET display_name = NULLIF(?, '')
+		WHERE group_id = ? AND whatsapp_id = ?`,
+		newName, groupID, whatsappID,
+	)
+	if err != nil {
+		return fmt.Errorf("update member name %s/%s: %w", groupID, whatsappID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("member %s not found in group %s", whatsappID, groupID)
+	}
+	return nil
+}
+
+// Remove deletes a member row. Returns an error if the row doesn't exist.
+// Caller is responsible for reassigning tasks before calling.
+func (s *MemberStore) Remove(ctx context.Context, groupID, whatsappID string) error {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM members WHERE group_id = ? AND whatsapp_id = ?`,
+		groupID, whatsappID,
+	)
+	if err != nil {
+		return fmt.Errorf("remove member %s/%s: %w", groupID, whatsappID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("member %s not found in group %s", whatsappID, groupID)
+	}
+	return nil
 }
 
 // Add inserts a member row. The composite PK (group_id, whatsapp_id) means
