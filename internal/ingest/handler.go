@@ -34,13 +34,15 @@ type ResponseBody struct {
 
 // Handler holds dependencies for the ingest HTTP handler.
 type Handler struct {
-	Store  *db.TxStore
-	Secret string
+	Store   *db.TxStore
+	Secret  string
+	GroupID string // tenant-zero JID — /ingest/transactions stays single-tenant per architecture D9
 }
 
 // NewHandler constructs an ingest handler. Secret must be non-empty.
-func NewHandler(store *db.TxStore, secret string) *Handler {
-	return &Handler{Store: store, Secret: secret}
+// groupID is the tenant-zero JID; in v1 the scraper always pushes to tenant zero.
+func NewHandler(store *db.TxStore, secret, groupID string) *Handler {
+	return &Handler{Store: store, Secret: secret, GroupID: groupID}
 }
 
 // ServeHTTP implements http.Handler. Mount at POST /ingest/transactions.
@@ -98,7 +100,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inserted, skipped, upErr := h.Store.UpsertBatch(req.Transactions)
+	inserted, skipped, upErr := h.Store.UpsertBatch(h.GroupID, req.Transactions)
 	if upErr != nil {
 		_ = h.Store.FinishRun(runID, "error", upErr.Error(), 0)
 		http.Error(w, "upsert: "+upErr.Error(), http.StatusInternalServerError)

@@ -123,16 +123,23 @@ func TestMigrate001AddsGroupIdColumns(t *testing.T) {
 
 func TestMigrate001CreatesGroupIdIndexes(t *testing.T) {
 	dbPath := setupMigratedDB(t)
-	for _, idx := range []string{"idx_tasks_group_id", "idx_metadata_group_id", "idx_transactions_group_id"} {
+	// migrate_001 creates explicit indexes on tasks and transactions. The
+	// metadata index it originally created is implicitly replaced by the
+	// composite (group_id, key) PK installed by migrate_003 — SQLite covers
+	// `WHERE group_id = ?` queries via the autoindex on that PK.
+	for _, idx := range []string{"idx_tasks_group_id", "idx_transactions_group_id"} {
 		if !indexExists(t, dbPath, idx) {
 			t.Errorf("expected %s index", idx)
 		}
 	}
 }
 
-func TestMigrate001ExistingTenantZeroRowsHaveNullGroupId(t *testing.T) {
-	// Explicitly clear WHATSAPP_GROUP_JID so migrate_002 is a no-op and
-	// existing rows retain NULL group_id (the post-migrate_001-only state).
+// TestMigrate001AddsGroupIdToExistingRows verifies that migrate_001's
+// ALTER TABLE adds the nullable group_id column without losing existing rows.
+// (We only check tasks/transactions because migrate_003 later recreates
+// metadata with NOT NULL group_id, so the post-all-migrations metadata table
+// won't carry a NULL row regardless of pre-migration content.)
+func TestMigrate001AddsGroupIdToExistingRows(t *testing.T) {
 	t.Setenv("WHATSAPP_GROUP_JID", "")
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
@@ -141,12 +148,22 @@ func TestMigrate001ExistingTenantZeroRowsHaveNullGroupId(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTaskStore: %v", err)
 	}
-	if _, err := taskStore.AddTask("Fix the sink", "Bob", ""); err != nil {
-		t.Fatalf("AddTask: %v", err)
+	// Raw SQL: simulate pre-multi-tenancy rows (no group_id column yet).
+	taskDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
 	}
-	if err := taskStore.SetMeta("last_digest_date", "2026-05-01"); err != nil {
-		t.Fatalf("SetMeta: %v", err)
+	if _, err := taskDB.Exec(
+		`INSERT INTO tasks (content, assignee, due_date) VALUES ('Fix the sink', 'Bob', '')`,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
 	}
+	if _, err := taskDB.Exec(
+		`INSERT INTO metadata (key, value) VALUES ('last_digest_date', '2026-05-01')`,
+	); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	taskDB.Close()
 	taskStore.Close()
 
 	txStore, err := NewTxStore(dbPath)
@@ -164,17 +181,16 @@ func TestMigrate001ExistingTenantZeroRowsHaveNullGroupId(t *testing.T) {
 		t.Fatalf("RunMigrations: %v", err)
 	}
 
-	// Story 1.3 leaves existing rows with NULL group_id; backfill is Story 1.4's job.
-	for _, table := range []string{"tasks", "metadata"} {
-		var n int
-		if err := migrationDB.QueryRow(
-			"SELECT COUNT(*) FROM " + table + " WHERE group_id IS NULL",
-		).Scan(&n); err != nil {
-			t.Fatalf("query %s: %v", table, err)
-		}
-		if n == 0 {
-			t.Errorf("expected at least one NULL group_id row in %s pre-backfill", table)
-		}
+	// Pre-existing tasks row survives migrate_001 with NULL group_id (story
+	// 1.4's backfill is what populates it; here we ran with no WHATSAPP_GROUP_JID).
+	var taskCount int
+	if err := migrationDB.QueryRow(
+		"SELECT COUNT(*) FROM tasks WHERE group_id IS NULL",
+	).Scan(&taskCount); err != nil {
+		t.Fatalf("query tasks: %v", err)
+	}
+	if taskCount != 1 {
+		t.Errorf("expected 1 task with NULL group_id (pre-backfill state), got %d", taskCount)
 	}
 }
 

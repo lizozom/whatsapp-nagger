@@ -30,7 +30,9 @@ type Transaction struct {
 	IngestedAt  string  `json:"ingested_at,omitempty"`
 }
 
-// IngestRun is a single invocation of a scraper provider.
+// IngestRun is a single invocation of a scraper provider. ingest_runs is
+// operator-facing scraper-run metadata, not tenant data — it is intentionally
+// not scoped by group_id (only tenant zero ever populates it in v1, per D9).
 type IngestRun struct {
 	ID         int64  `json:"id"`
 	Provider   string `json:"provider"`
@@ -110,13 +112,13 @@ func ComputeTxID(provider, cardLast4, postedAt string, amountILS float64, descri
 	return hex.EncodeToString(sum[:16]) // 128-bit prefix is plenty
 }
 
-// UpsertBatch inserts transactions inside a single transaction, skipping rows
-// whose ID already exists. Returns (inserted, skipped).
+// UpsertBatch inserts transactions for groupID inside a single transaction,
+// skipping rows whose ID already exists. Returns (inserted, skipped).
 //
 // For each incoming Transaction, if ID is empty it will be computed.
 // If a row with the same ID already exists but with different fields, it is
 // left untouched (we trust historical data over re-fetches to avoid flapping).
-func (s *TxStore) UpsertBatch(txs []Transaction) (inserted, skipped int, err error) {
+func (s *TxStore) UpsertBatch(groupID string, txs []Transaction) (inserted, skipped int, err error) {
 	if len(txs) == 0 {
 		return 0, 0, nil
 	}
@@ -133,8 +135,8 @@ func (s *TxStore) UpsertBatch(txs []Transaction) (inserted, skipped int, err err
 
 	stmt, err := dbTx.Prepare(`
 		INSERT INTO transactions
-		  (id, provider, card_last4, posted_at, amount_ils, description, memo, category, status, raw_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  (id, group_id, provider, card_last4, posted_at, amount_ils, description, memo, category, status, raw_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING
 	`)
 	if err != nil {
@@ -151,7 +153,7 @@ func (s *TxStore) UpsertBatch(txs []Transaction) (inserted, skipped int, err err
 			t.Status = "posted"
 		}
 		res, execErr := stmt.Exec(
-			t.ID, t.Provider, t.CardLast4, t.PostedAt, t.AmountILS,
+			t.ID, groupID, t.Provider, t.CardLast4, t.PostedAt, t.AmountILS,
 			t.Description, t.Memo, t.Category, t.Status, t.RawJSON,
 		)
 		if execErr != nil {
@@ -173,6 +175,8 @@ func (s *TxStore) UpsertBatch(txs []Transaction) (inserted, skipped int, err err
 }
 
 // StartRun records the beginning of a scraper run and returns its id.
+// ingest_runs is operator-facing run metadata, not tenant data — see comment
+// on IngestRun for why it isn't group-scoped in v1.
 func (s *TxStore) StartRun(provider string) (int64, error) {
 	res, err := s.db.Exec(
 		`INSERT INTO ingest_runs (provider, started_at, status) VALUES (?, ?, 'running')`,
@@ -238,13 +242,13 @@ type SumRow struct {
 }
 
 // SumBy groups transactions by the requested dimension and returns aggregated
-// totals. Allowed groupBy values: "category", "merchant", "month", "provider",
-// "card_last4". Rows are ordered by spent_ils DESC.
-func (s *TxStore) SumBy(groupBy string, filter TxFilter) ([]SumRow, error) {
+// totals scoped to groupID. Allowed groupBy values: "category", "merchant",
+// "month", "provider", "card_last4". Rows are ordered by spent_ils DESC.
+func (s *TxStore) SumBy(groupID, groupBy string, filter TxFilter) ([]SumRow, error) {
 	// "category" uses merchant-aware normalization which SQL can't express
 	// cleanly, so we fetch raw rows and aggregate in Go.
 	if groupBy == "category" {
-		return s.sumByNormalizedCategory(filter)
+		return s.sumByNormalizedCategory(groupID, filter)
 	}
 
 	var expr string
@@ -261,7 +265,7 @@ func (s *TxStore) SumBy(groupBy string, filter TxFilter) ([]SumRow, error) {
 		return nil, fmt.Errorf("invalid groupBy: %q", groupBy)
 	}
 
-	where, args := buildTxWhere(filter)
+	where, args := buildTxWhere(groupID, filter)
 	q := fmt.Sprintf(`
 		SELECT %s AS key,
 		       COUNT(*) AS tx_count,
@@ -296,8 +300,8 @@ func (s *TxStore) SumBy(groupBy string, filter TxFilter) ([]SumRow, error) {
 
 // sumByNormalizedCategory fetches raw rows and groups by normalized
 // category (applying merchant overrides from the categories package).
-func (s *TxStore) sumByNormalizedCategory(filter TxFilter) ([]SumRow, error) {
-	where, args := buildTxWhere(filter)
+func (s *TxStore) sumByNormalizedCategory(groupID string, filter TxFilter) ([]SumRow, error) {
+	where, args := buildTxWhere(groupID, filter)
 	q := `SELECT description, COALESCE(category, ''), amount_ils
 	      FROM transactions ` + where
 
@@ -351,9 +355,9 @@ func roundCents(v float64) float64 {
 }
 
 // QueryTransactions is like ListTransactions but accepts the shared TxFilter,
-// supporting category / merchant / debits-only filters.
-func (s *TxStore) QueryTransactions(filter TxFilter) ([]Transaction, error) {
-	where, args := buildTxWhere(filter)
+// supporting category / merchant / debits-only filters. Scoped to groupID.
+func (s *TxStore) QueryTransactions(groupID string, filter TxFilter) ([]Transaction, error) {
+	where, args := buildTxWhere(groupID, filter)
 	var orderBy string
 	switch filter.SortBy {
 	case "amount":
@@ -386,9 +390,9 @@ func (s *TxStore) QueryTransactions(filter TxFilter) ([]Transaction, error) {
 	return out, rows.Err()
 }
 
-func buildTxWhere(filter TxFilter) (string, []any) {
-	var where []string
-	var args []any
+func buildTxWhere(groupID string, filter TxFilter) (string, []any) {
+	where := []string{"group_id = ?"}
+	args := []any{groupID}
 	if filter.Since != "" {
 		where = append(where, "posted_at >= ?")
 		args = append(args, filter.Since)
@@ -437,12 +441,12 @@ func buildTxWhere(filter TxFilter) (string, []any) {
 	return "WHERE " + strings.Join(where, " AND "), args
 }
 
-// TotalSpent returns aggregate totals for the given filter as a single row.
+// TotalSpent returns aggregate totals for groupID + filter as a single row.
 // Used by the owner group-by dispatch in the agent layer.
 //
 // spent_ils is net of refunds (see SumRow docs).
-func (s *TxStore) TotalSpent(filter TxFilter) (SumRow, error) {
-	where, args := buildTxWhere(filter)
+func (s *TxStore) TotalSpent(groupID string, filter TxFilter) (SumRow, error) {
+	where, args := buildTxWhere(groupID, filter)
 	q := `SELECT COUNT(*),
 	             ROUND(-COALESCE(SUM(amount_ils), 0), 2),
 	             ROUND(COALESCE(SUM(CASE WHEN amount_ils < 0 THEN -amount_ils ELSE 0 END), 0), 2),
@@ -455,27 +459,24 @@ func (s *TxStore) TotalSpent(filter TxFilter) (SumRow, error) {
 	return r, nil
 }
 
-// ListTransactions returns transactions filtered by provider and/or date range.
-// Empty arguments are ignored. Results are ordered by posted_at DESC.
-func (s *TxStore) ListTransactions(provider, sinceISO, untilISO string, limit int) ([]Transaction, error) {
+// ListTransactions returns transactions for groupID, optionally filtered by
+// provider and/or date range. Empty arguments are ignored. Results are
+// ordered by posted_at DESC.
+func (s *TxStore) ListTransactions(groupID, provider, sinceISO, untilISO string, limit int) ([]Transaction, error) {
 	q := `SELECT id, provider, card_last4, posted_at, amount_ils, description, memo, category, status, raw_json, ingested_at
-	      FROM transactions`
-	var where []string
-	var args []any
+	      FROM transactions WHERE group_id = ?`
+	args := []any{groupID}
 	if provider != "" {
-		where = append(where, "provider = ?")
+		q += " AND provider = ?"
 		args = append(args, provider)
 	}
 	if sinceISO != "" {
-		where = append(where, "posted_at >= ?")
+		q += " AND posted_at >= ?"
 		args = append(args, sinceISO)
 	}
 	if untilISO != "" {
-		where = append(where, "posted_at <= ?")
+		q += " AND posted_at <= ?"
 		args = append(args, untilISO)
-	}
-	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
 	}
 	q += " ORDER BY posted_at DESC, id ASC"
 	if limit > 0 {

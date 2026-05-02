@@ -42,36 +42,50 @@ func setupTenantZeroMigrationTest(t *testing.T, opts ...func(*migrate002SetupOpt
 	if err != nil {
 		t.Fatalf("NewTaskStore: %v", err)
 	}
-	for _, st := range o.preTasks {
-		if _, err := taskStore.AddTask(st.content, st.assignee, st.dueDate); err != nil {
-			t.Fatalf("seed AddTask: %v", err)
-		}
-	}
-	for _, m := range o.preMetadata {
-		if err := taskStore.SetMeta(m.key, m.value); err != nil {
-			t.Fatalf("seed SetMeta: %v", err)
-		}
-	}
 	taskStore.Close()
 
 	txStore, err := NewTxStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewTxStore: %v", err)
 	}
-	if o.preTransactions {
-		if _, _, err := txStore.UpsertBatch([]Transaction{{
-			ID:          ComputeTxID("max", "1234", "2026-04-01", -42.50, "Test merchant", ""),
-			Provider:    "max",
-			CardLast4:   "1234",
-			PostedAt:    "2026-04-01",
-			AmountILS:   -42.50,
-			Description: "Test merchant",
-			Status:      "posted",
-		}}); err != nil {
-			t.Fatalf("seed UpsertBatch: %v", err)
+	txStore.Close()
+
+	// Raw SQL seed: these rows simulate pre-multi-tenancy state with no
+	// group_id column. The migration we're testing is what adds the column
+	// (migrate_001) and backfills it (migrate_002), so we can't use the
+	// post-Story-1.5 store APIs to seed.
+	seedDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	for _, st := range o.preTasks {
+		if _, err := seedDB.Exec(
+			`INSERT INTO tasks (content, assignee, due_date) VALUES (?, ?, ?)`,
+			st.content, st.assignee, st.dueDate,
+		); err != nil {
+			t.Fatalf("seed task: %v", err)
 		}
 	}
-	txStore.Close()
+	for _, m := range o.preMetadata {
+		if _, err := seedDB.Exec(
+			`INSERT INTO metadata (key, value) VALUES (?, ?)`,
+			m.key, m.value,
+		); err != nil {
+			t.Fatalf("seed metadata: %v", err)
+		}
+	}
+	if o.preTransactions {
+		txID := ComputeTxID("max", "1234", "2026-04-01", -42.50, "Test merchant", "")
+		if _, err := seedDB.Exec(
+			`INSERT INTO transactions
+			   (id, provider, card_last4, posted_at, amount_ils, description, status)
+			 VALUES (?, 'max', '1234', '2026-04-01', -42.50, 'Test merchant', 'posted')`,
+			txID,
+		); err != nil {
+			t.Fatalf("seed transaction: %v", err)
+		}
+	}
+	seedDB.Close()
 
 	if o.personasBody != "" {
 		personasPath := filepath.Join(dir, "personas.md")

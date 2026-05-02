@@ -52,34 +52,32 @@ func NewTaskStore(dbPath string) (*TaskStore, error) {
 	return &TaskStore{db: db}, nil
 }
 
-func (s *TaskStore) AddTask(content, assignee, dueDate string) (*Task, error) {
+// AddTask inserts a new task scoped to groupID.
+func (s *TaskStore) AddTask(groupID, content, assignee, dueDate string) (*Task, error) {
 	res, err := s.db.Exec(
-		"INSERT INTO tasks (content, assignee, due_date) VALUES (?, ?, ?)",
-		content, assignee, dueDate,
+		"INSERT INTO tasks (group_id, content, assignee, due_date) VALUES (?, ?, ?, ?)",
+		groupID, content, assignee, dueDate,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert task: %w", err)
 	}
 
 	id, _ := res.LastInsertId()
-	return s.getByID(id)
+	return s.getByID(groupID, id)
 }
 
-func (s *TaskStore) ListTasks(assignee, status string) ([]Task, error) {
-	query := "SELECT id, content, assignee, status, COALESCE(due_date,''), created_at, updated_at FROM tasks"
-	var conditions []string
-	var args []any
+// ListTasks returns tasks scoped to groupID, optionally filtered by assignee/status.
+func (s *TaskStore) ListTasks(groupID, assignee, status string) ([]Task, error) {
+	query := "SELECT id, content, assignee, status, COALESCE(due_date,''), created_at, updated_at FROM tasks WHERE group_id = ?"
+	args := []any{groupID}
 
 	if assignee != "" {
-		conditions = append(conditions, "LOWER(assignee) = LOWER(?)")
+		query += " AND LOWER(assignee) = LOWER(?)"
 		args = append(args, assignee)
 	}
 	if status != "" {
-		conditions = append(conditions, "status = ?")
+		query += " AND status = ?"
 		args = append(args, status)
-	}
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	query += " ORDER BY CASE WHEN due_date IS NULL OR due_date = '' THEN 1 ELSE 0 END, due_date ASC, created_at DESC"
 
@@ -100,7 +98,8 @@ func (s *TaskStore) ListTasks(assignee, status string) ([]Task, error) {
 	return tasks, rows.Err()
 }
 
-func (s *TaskStore) UpdateTask(id int64, status, dueDate string) (*Task, error) {
+// UpdateTask updates a task within groupID. Only sets fields that are non-empty.
+func (s *TaskStore) UpdateTask(groupID string, id int64, status, dueDate string) (*Task, error) {
 	var setClauses []string
 	var args []any
 
@@ -113,22 +112,23 @@ func (s *TaskStore) UpdateTask(id int64, status, dueDate string) (*Task, error) 
 		args = append(args, dueDate)
 	}
 	if len(setClauses) == 0 {
-		return s.getByID(id)
+		return s.getByID(groupID, id)
 	}
 
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
-	args = append(args, id)
+	args = append(args, id, groupID)
 
-	query := fmt.Sprintf("UPDATE tasks SET %s WHERE id = ?", strings.Join(setClauses, ", "))
+	query := fmt.Sprintf("UPDATE tasks SET %s WHERE id = ? AND group_id = ?", strings.Join(setClauses, ", "))
 	_, err := s.db.Exec(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("update task: %w", err)
 	}
-	return s.getByID(id)
+	return s.getByID(groupID, id)
 }
 
-func (s *TaskStore) DeleteTask(id int64) error {
-	res, err := s.db.Exec("DELETE FROM tasks WHERE id = ?", id)
+// DeleteTask removes a task within groupID. Returns an error if the task doesn't exist in that group.
+func (s *TaskStore) DeleteTask(groupID string, id int64) error {
+	res, err := s.db.Exec("DELETE FROM tasks WHERE id = ? AND group_id = ?", id, groupID)
 	if err != nil {
 		return fmt.Errorf("delete task: %w", err)
 	}
@@ -139,13 +139,12 @@ func (s *TaskStore) DeleteTask(id int64) error {
 	return nil
 }
 
-// CountOverdueByAssignee returns the number of pending tasks with a due date
-// strictly before `before` (YYYY-MM-DD), grouped by assignee.
-func (s *TaskStore) CountOverdueByAssignee(before string) (map[string]int, error) {
+// CountOverdueByAssignee returns counts of pending overdue tasks within groupID.
+func (s *TaskStore) CountOverdueByAssignee(groupID, before string) (map[string]int, error) {
 	rows, err := s.db.Query(
 		`SELECT assignee, COUNT(*) FROM tasks
-		 WHERE status = 'pending' AND due_date != '' AND due_date < ?
-		 GROUP BY assignee`, before)
+		 WHERE group_id = ? AND status = 'pending' AND due_date != '' AND due_date < ?
+		 GROUP BY assignee`, groupID, before)
 	if err != nil {
 		return nil, fmt.Errorf("count overdue: %w", err)
 	}
@@ -167,28 +166,36 @@ func (s *TaskStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *TaskStore) GetMeta(key string) (string, error) {
+// GetMeta returns the metadata value for (groupID, key), or "" if absent.
+func (s *TaskStore) GetMeta(groupID, key string) (string, error) {
 	var value string
-	err := s.db.QueryRow("SELECT value FROM metadata WHERE key = ?", key).Scan(&value)
+	err := s.db.QueryRow(
+		"SELECT value FROM metadata WHERE group_id = ? AND key = ?",
+		groupID, key,
+	).Scan(&value)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	return value, err
 }
 
-func (s *TaskStore) SetMeta(key, value string) error {
+// SetMeta upserts the metadata value for (groupID, key). Requires the
+// composite (group_id, key) PK installed by migrate_003.
+func (s *TaskStore) SetMeta(groupID, key, value string) error {
 	_, err := s.db.Exec(
-		"INSERT INTO metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
-		key, value, value,
+		`INSERT INTO metadata (group_id, key, value) VALUES (?, ?, ?)
+		 ON CONFLICT(group_id, key) DO UPDATE SET value = ?`,
+		groupID, key, value, value,
 	)
 	return err
 }
 
-func (s *TaskStore) getByID(id int64) (*Task, error) {
+func (s *TaskStore) getByID(groupID string, id int64) (*Task, error) {
 	var t Task
 	err := s.db.QueryRow(
-		"SELECT id, content, assignee, status, COALESCE(due_date,''), created_at, updated_at FROM tasks WHERE id = ?",
-		id,
+		`SELECT id, content, assignee, status, COALESCE(due_date,''), created_at, updated_at
+		 FROM tasks WHERE id = ? AND group_id = ?`,
+		id, groupID,
 	).Scan(&t.ID, &t.Content, &t.Assignee, &t.Status, &t.DueDate, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get task %d: %w", id, err)

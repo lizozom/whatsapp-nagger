@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/lizozom/whatsapp-nagger/internal/db"
 	"github.com/lizozom/whatsapp-nagger/internal/version"
+	_ "modernc.org/sqlite"
 )
+
+const testGroupID = "120363999999@g.us"
 
 func newTestAgent(t *testing.T) *Agent {
 	t.Helper()
@@ -18,9 +22,25 @@ func newTestAgent(t *testing.T) *Agent {
 	if err != nil {
 		t.Fatalf("NewTaskStore: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	// migrate_001 ALTERs the transactions table, so it must exist first.
+	txStore, err := db.NewTxStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewTxStore: %v", err)
+	}
+	txStore.Close()
 
-	return &Agent{store: store}
+	migDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open migration db: %v", err)
+	}
+	t.Setenv("WHATSAPP_GROUP_JID", "")
+	if err := db.RunMigrations(migDB); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	migDB.Close()
+
+	t.Cleanup(func() { store.Close() })
+	return &Agent{store: store, groupID: testGroupID}
 }
 
 func TestExecuteToolAddTask(t *testing.T) {

@@ -1,11 +1,18 @@
 package db
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
+// testGroupID is the placeholder JID used by all task/metadata tests.
+const testGroupID = "120363999999@g.us"
+
+// newTestStore creates a TaskStore plus runs migrations so the group_id
+// column exists on the tasks/metadata tables. Caller passes testGroupID
+// to every TaskStore method.
 func newTestStore(t *testing.T) *TaskStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -13,6 +20,27 @@ func newTestStore(t *testing.T) *TaskStore {
 	if err != nil {
 		t.Fatalf("NewTaskStore: %v", err)
 	}
+	// migrate_001 ALTERs the transactions table, so it must exist first.
+	txStore, err := NewTxStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewTxStore: %v", err)
+	}
+	txStore.Close()
+
+	// Run migrations on a separate connection so the group_id column lands
+	// before any test query touches the tables.
+	migDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open migration db: %v", err)
+	}
+	// Disable migrate_002's tenant-zero backfill — these tests pre-date
+	// any tenant-zero data and don't want personas pulled in.
+	t.Setenv("WHATSAPP_GROUP_JID", "")
+	if err := RunMigrations(migDB); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	migDB.Close()
+
 	t.Cleanup(func() { store.Close() })
 	return store
 }
@@ -20,7 +48,7 @@ func newTestStore(t *testing.T) *TaskStore {
 func TestAddTask(t *testing.T) {
 	store := newTestStore(t)
 
-	task, err := store.AddTask("Fix the sink", "Bob", "2026-03-25")
+	task, err := store.AddTask(testGroupID, "Fix the sink", "Bob", "2026-03-25")
 	if err != nil {
 		t.Fatalf("AddTask: %v", err)
 	}
@@ -45,7 +73,7 @@ func TestAddTask(t *testing.T) {
 func TestAddTaskNoDueDate(t *testing.T) {
 	store := newTestStore(t)
 
-	task, err := store.AddTask("Buy milk", "Alice", "")
+	task, err := store.AddTask(testGroupID, "Buy milk", "Alice", "")
 	if err != nil {
 		t.Fatalf("AddTask: %v", err)
 	}
@@ -57,11 +85,11 @@ func TestAddTaskNoDueDate(t *testing.T) {
 func TestListTasksAll(t *testing.T) {
 	store := newTestStore(t)
 
-	store.AddTask("Task 1", "Bob", "")
-	store.AddTask("Task 2", "Alice", "")
-	store.AddTask("Task 3", "Bob", "")
+	store.AddTask(testGroupID, "Task 1", "Bob", "")
+	store.AddTask(testGroupID, "Task 2", "Alice", "")
+	store.AddTask(testGroupID, "Task 3", "Bob", "")
 
-	tasks, err := store.ListTasks("", "")
+	tasks, err := store.ListTasks(testGroupID, "", "")
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -73,11 +101,11 @@ func TestListTasksAll(t *testing.T) {
 func TestListTasksByAssignee(t *testing.T) {
 	store := newTestStore(t)
 
-	store.AddTask("Task 1", "Bob", "")
-	store.AddTask("Task 2", "Alice", "")
-	store.AddTask("Task 3", "Bob", "")
+	store.AddTask(testGroupID, "Task 1", "Bob", "")
+	store.AddTask(testGroupID, "Task 2", "Alice", "")
+	store.AddTask(testGroupID, "Task 3", "Bob", "")
 
-	tasks, err := store.ListTasks("Bob", "")
+	tasks, err := store.ListTasks(testGroupID, "Bob", "")
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -89,9 +117,9 @@ func TestListTasksByAssignee(t *testing.T) {
 func TestListTasksCaseInsensitive(t *testing.T) {
 	store := newTestStore(t)
 
-	store.AddTask("Task 1", "Bob", "")
+	store.AddTask(testGroupID, "Task 1", "Bob", "")
 
-	tasks, err := store.ListTasks("bob", "")
+	tasks, err := store.ListTasks(testGroupID, "bob", "")
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -103,11 +131,11 @@ func TestListTasksCaseInsensitive(t *testing.T) {
 func TestListTasksByStatus(t *testing.T) {
 	store := newTestStore(t)
 
-	task, _ := store.AddTask("Task 1", "Bob", "")
-	store.AddTask("Task 2", "Bob", "")
-	store.UpdateTask(task.ID, "done", "")
+	task, _ := store.AddTask(testGroupID, "Task 1", "Bob", "")
+	store.AddTask(testGroupID, "Task 2", "Bob", "")
+	store.UpdateTask(testGroupID, task.ID, "done", "")
 
-	pending, err := store.ListTasks("", "pending")
+	pending, err := store.ListTasks(testGroupID, "", "pending")
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -115,7 +143,7 @@ func TestListTasksByStatus(t *testing.T) {
 		t.Errorf("expected 1 pending task, got %d", len(pending))
 	}
 
-	done, err := store.ListTasks("", "done")
+	done, err := store.ListTasks(testGroupID, "", "done")
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -127,8 +155,8 @@ func TestListTasksByStatus(t *testing.T) {
 func TestUpdateTask(t *testing.T) {
 	store := newTestStore(t)
 
-	task, _ := store.AddTask("Fix the sink", "Bob", "")
-	updated, err := store.UpdateTask(task.ID, "done", "")
+	task, _ := store.AddTask(testGroupID, "Fix the sink", "Bob", "")
+	updated, err := store.UpdateTask(testGroupID, task.ID, "done", "")
 	if err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
@@ -143,13 +171,13 @@ func TestUpdateTask(t *testing.T) {
 func TestDeleteTask(t *testing.T) {
 	store := newTestStore(t)
 
-	task, _ := store.AddTask("Fix the sink", "Bob", "")
-	err := store.DeleteTask(task.ID)
+	task, _ := store.AddTask(testGroupID, "Fix the sink", "Bob", "")
+	err := store.DeleteTask(testGroupID, task.ID)
 	if err != nil {
 		t.Fatalf("DeleteTask: %v", err)
 	}
 
-	tasks, _ := store.ListTasks("", "")
+	tasks, _ := store.ListTasks(testGroupID, "", "")
 	if len(tasks) != 0 {
 		t.Errorf("expected 0 tasks after delete, got %d", len(tasks))
 	}
@@ -158,9 +186,100 @@ func TestDeleteTask(t *testing.T) {
 func TestDeleteTaskNotFound(t *testing.T) {
 	store := newTestStore(t)
 
-	err := store.DeleteTask(999)
+	err := store.DeleteTask(testGroupID, 999)
 	if err == nil {
 		t.Fatal("expected error deleting nonexistent task")
+	}
+}
+
+func TestDeleteTaskWrongGroup(t *testing.T) {
+	store := newTestStore(t)
+
+	task, _ := store.AddTask(testGroupID, "Fix the sink", "Bob", "")
+	err := store.DeleteTask("120363111111@g.us", task.ID)
+	if err == nil {
+		t.Fatal("expected error: task should not be visible from a different group")
+	}
+
+	// Task still exists in its original group.
+	tasks, _ := store.ListTasks(testGroupID, "", "")
+	if len(tasks) != 1 {
+		t.Errorf("expected task to remain in original group, got %d tasks", len(tasks))
+	}
+}
+
+func TestListTasksScopedByGroup(t *testing.T) {
+	store := newTestStore(t)
+	groupA := testGroupID
+	groupB := "120363AAAAAA@g.us"
+
+	store.AddTask(groupA, "A1", "Alice", "")
+	store.AddTask(groupA, "A2", "Bob", "")
+	store.AddTask(groupB, "B1", "Alice", "")
+
+	tasksA, _ := store.ListTasks(groupA, "", "")
+	if len(tasksA) != 2 {
+		t.Errorf("group A: expected 2 tasks, got %d", len(tasksA))
+	}
+	tasksB, _ := store.ListTasks(groupB, "", "")
+	if len(tasksB) != 1 {
+		t.Errorf("group B: expected 1 task, got %d", len(tasksB))
+	}
+}
+
+func TestMetadataScopedByGroup(t *testing.T) {
+	store := newTestStore(t)
+	groupA := testGroupID
+	groupB := "120363AAAAAA@g.us"
+
+	if err := store.SetMeta(groupA, "last_digest_date", "2026-05-01"); err != nil {
+		t.Fatalf("SetMeta A: %v", err)
+	}
+	if err := store.SetMeta(groupB, "last_digest_date", "2026-05-02"); err != nil {
+		t.Fatalf("SetMeta B: %v", err)
+	}
+
+	a, _ := store.GetMeta(groupA, "last_digest_date")
+	if a != "2026-05-01" {
+		t.Errorf("group A: got %q, want %q", a, "2026-05-01")
+	}
+	b, _ := store.GetMeta(groupB, "last_digest_date")
+	if b != "2026-05-02" {
+		t.Errorf("group B: got %q, want %q", b, "2026-05-02")
+	}
+}
+
+func TestSetMetaUpsert(t *testing.T) {
+	store := newTestStore(t)
+
+	if err := store.SetMeta(testGroupID, "k", "v1"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if err := store.SetMeta(testGroupID, "k", "v2"); err != nil {
+		t.Fatalf("SetMeta upsert: %v", err)
+	}
+	got, _ := store.GetMeta(testGroupID, "k")
+	if got != "v2" {
+		t.Errorf("expected upserted value v2, got %q", got)
+	}
+}
+
+func TestCountOverdueByAssigneeScopedByGroup(t *testing.T) {
+	store := newTestStore(t)
+	groupA := testGroupID
+	groupB := "120363AAAAAA@g.us"
+
+	store.AddTask(groupA, "old", "Alice", "2026-01-01")
+	store.AddTask(groupA, "old", "Alice", "2026-01-02")
+	store.AddTask(groupB, "old", "Alice", "2026-01-01")
+
+	countsA, _ := store.CountOverdueByAssignee(groupA, "2026-05-02")
+	if countsA["Alice"] != 2 {
+		t.Errorf("group A: expected 2 overdue for Alice, got %d", countsA["Alice"])
+	}
+	countsB, _ := store.CountOverdueByAssignee(groupB, "2026-05-02")
+	if countsB["Alice"] != 1 {
+		t.Errorf("group B: expected 1 overdue for Alice, got %d", countsB["Alice"])
 	}
 }
 

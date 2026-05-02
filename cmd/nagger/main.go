@@ -50,7 +50,15 @@ func main() {
 	}
 	migrationDB.Close()
 
-	a := agent.NewAgent(store, txStore)
+	// Tenant-zero JID — used for every store call in v1 since the codebase
+	// is still single-group-aware at the call sites. Epic 2's dispatcher
+	// will replace per-message with envelope-derived group_id.
+	tenantZeroJID := os.Getenv("WHATSAPP_GROUP_JID")
+	if tenantZeroJID == "" {
+		tenantZeroJID = "dev-group"
+	}
+
+	a := agent.NewAgent(store, txStore, tenantZeroJID)
 
 	// --- Single HTTP mux for all endpoints ---
 	mux := http.NewServeMux()
@@ -61,10 +69,10 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// Ingest endpoint (opt-in via INGEST_SECRET).
+	// Ingest endpoint (opt-in via INGEST_SECRET). Tenant-zero only per D9.
 	ingestSecret := os.Getenv("INGEST_SECRET")
 	if ingestSecret != "" {
-		mux.Handle("/ingest/transactions", ingest.NewHandler(txStore, ingestSecret))
+		mux.Handle("/ingest/transactions", ingest.NewHandler(txStore, ingestSecret, tenantZeroJID))
 	}
 
 	// Messenger setup.
@@ -129,7 +137,7 @@ func main() {
 	}()
 
 	if digestHour := os.Getenv("DIGEST_HOUR"); digestHour != "" {
-		go startDigestScheduler(digestHour, a, m, store)
+		go startDigestScheduler(digestHour, a, m, store, tenantZeroJID)
 	}
 
 	// Nag DM scheduler — sends private reminders to people with too many overdue tasks.
@@ -139,7 +147,7 @@ func main() {
 			if v, err := strconv.Atoi(os.Getenv("NAG_THRESHOLD")); err == nil && v > 0 {
 				threshold = v
 			}
-			go startNagScheduler(nagHour, threshold, wa, store)
+			go startNagScheduler(nagHour, threshold, wa, store, tenantZeroJID)
 		}
 	}
 
@@ -170,7 +178,7 @@ func sendWithMentions(m messenger.IMessenger, text string) error {
 	return m.Write(text)
 }
 
-func startNagScheduler(nagHour string, threshold int, wa *messenger.WhatsApp, store *db.TaskStore) {
+func startNagScheduler(nagHour string, threshold int, wa *messenger.WhatsApp, store *db.TaskStore, groupID string) {
 	loc, _ := time.LoadLocation("Asia/Jerusalem")
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -187,12 +195,12 @@ func startNagScheduler(nagHour string, threshold int, wa *messenger.WhatsApp, st
 			continue
 		}
 
-		lastDate, _ := store.GetMeta("last_nag_date")
+		lastDate, _ := store.GetMeta(groupID, "last_nag_date")
 		if lastDate == today {
 			continue
 		}
 
-		counts, err := store.CountOverdueByAssignee(today)
+		counts, err := store.CountOverdueByAssignee(groupID, today)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Nag: overdue query error: %v\n", err)
 			continue
@@ -216,12 +224,12 @@ func startNagScheduler(nagHour string, threshold int, wa *messenger.WhatsApp, st
 			nagged++
 		}
 
-		store.SetMeta("last_nag_date", today)
+		store.SetMeta(groupID, "last_nag_date", today)
 		fmt.Fprintf(os.Stderr, "Nag: done for %s, nagged %d people.\n", today, nagged)
 	}
 }
 
-func startDigestScheduler(digestHour string, a *agent.Agent, m messenger.IMessenger, store *db.TaskStore) {
+func startDigestScheduler(digestHour string, a *agent.Agent, m messenger.IMessenger, store *db.TaskStore, groupID string) {
 	loc, _ := time.LoadLocation("Asia/Jerusalem")
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -235,7 +243,7 @@ func startDigestScheduler(digestHour string, a *agent.Agent, m messenger.IMessen
 			continue
 		}
 
-		lastDate, _ := store.GetMeta("last_digest_date")
+		lastDate, _ := store.GetMeta(groupID, "last_digest_date")
 		if lastDate == today {
 			continue
 		}
@@ -252,7 +260,7 @@ func startDigestScheduler(digestHour string, a *agent.Agent, m messenger.IMessen
 			continue
 		}
 
-		store.SetMeta("last_digest_date", today)
+		store.SetMeta(groupID, "last_digest_date", today)
 		fmt.Fprintln(os.Stderr, "Daily digest sent.")
 	}
 }

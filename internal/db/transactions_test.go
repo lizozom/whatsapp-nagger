@@ -1,17 +1,39 @@
 package db
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
 
+// newTestTxStore creates a TxStore plus runs migrations so the group_id
+// column exists on transactions. Tests pass testGroupID to every method.
 func newTestTxStore(t *testing.T) *TxStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "tx.db")
+
+	// Migrations expect the base tables, so seed them first.
+	taskStore, err := NewTaskStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewTaskStore: %v", err)
+	}
+	taskStore.Close()
+
 	store, err := NewTxStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewTxStore: %v", err)
 	}
+
+	migDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open migration db: %v", err)
+	}
+	t.Setenv("WHATSAPP_GROUP_JID", "")
+	if err := RunMigrations(migDB); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	migDB.Close()
+
 	t.Cleanup(func() { store.Close() })
 	return store
 }
@@ -43,7 +65,7 @@ func TestUpsertBatchInsertsAndDedupes(t *testing.T) {
 		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-04-02", AmountILS: -12.0, Description: "CAFE"},
 	}
 
-	ins, skip, err := store.UpsertBatch(txs)
+	ins, skip, err := store.UpsertBatch(testGroupID, txs)
 	if err != nil {
 		t.Fatalf("UpsertBatch: %v", err)
 	}
@@ -52,7 +74,7 @@ func TestUpsertBatchInsertsAndDedupes(t *testing.T) {
 	}
 
 	// Re-run: same payload should be a no-op.
-	ins, skip, err = store.UpsertBatch(txs)
+	ins, skip, err = store.UpsertBatch(testGroupID, txs)
 	if err != nil {
 		t.Fatalf("UpsertBatch rerun: %v", err)
 	}
@@ -64,14 +86,14 @@ func TestUpsertBatchInsertsAndDedupes(t *testing.T) {
 func TestUpsertBatchMixedNewAndOld(t *testing.T) {
 	store := newTestTxStore(t)
 
-	_, _, err := store.UpsertBatch([]Transaction{
+	_, _, err := store.UpsertBatch(testGroupID, []Transaction{
 		{Provider: "max", CardLast4: "9999", PostedAt: "2026-04-01", AmountILS: -100, Description: "A"},
 	})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	ins, skip, err := store.UpsertBatch([]Transaction{
+	ins, skip, err := store.UpsertBatch(testGroupID, []Transaction{
 		{Provider: "max", CardLast4: "9999", PostedAt: "2026-04-01", AmountILS: -100, Description: "A"}, // dup
 		{Provider: "max", CardLast4: "9999", PostedAt: "2026-04-02", AmountILS: -200, Description: "B"}, // new
 	})
@@ -85,7 +107,7 @@ func TestUpsertBatchMixedNewAndOld(t *testing.T) {
 
 func TestListTransactionsFilters(t *testing.T) {
 	store := newTestTxStore(t)
-	_, _, err := store.UpsertBatch([]Transaction{
+	_, _, err := store.UpsertBatch(testGroupID, []Transaction{
 		{Provider: "cal", PostedAt: "2026-03-15", AmountILS: -10, Description: "old"},
 		{Provider: "cal", PostedAt: "2026-04-01", AmountILS: -20, Description: "new"},
 		{Provider: "max", PostedAt: "2026-04-02", AmountILS: -30, Description: "other provider"},
@@ -94,7 +116,7 @@ func TestListTransactionsFilters(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	calOnly, err := store.ListTransactions("cal", "", "", 0)
+	calOnly, err := store.ListTransactions(testGroupID, "cal", "", "", 0)
 	if err != nil {
 		t.Fatalf("list cal: %v", err)
 	}
@@ -102,7 +124,7 @@ func TestListTransactionsFilters(t *testing.T) {
 		t.Errorf("expected 2 cal tx, got %d", len(calOnly))
 	}
 
-	sinceApril, err := store.ListTransactions("", "2026-04-01", "", 0)
+	sinceApril, err := store.ListTransactions(testGroupID, "", "2026-04-01", "", 0)
 	if err != nil {
 		t.Fatalf("list since: %v", err)
 	}
@@ -111,9 +133,35 @@ func TestListTransactionsFilters(t *testing.T) {
 	}
 }
 
+func TestUpsertBatchScopedByGroup(t *testing.T) {
+	store := newTestTxStore(t)
+	groupA := testGroupID
+	groupB := "120363AAAAAA@g.us"
+
+	if _, _, err := store.UpsertBatch(groupA, []Transaction{
+		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-04-01", AmountILS: -10, Description: "A-only"},
+	}); err != nil {
+		t.Fatalf("seed A: %v", err)
+	}
+	if _, _, err := store.UpsertBatch(groupB, []Transaction{
+		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-04-01", AmountILS: -20, Description: "B-only"},
+	}); err != nil {
+		t.Fatalf("seed B: %v", err)
+	}
+
+	rowsA, _ := store.ListTransactions(groupA, "", "", "", 0)
+	if len(rowsA) != 1 || rowsA[0].Description != "A-only" {
+		t.Errorf("group A: got %+v", rowsA)
+	}
+	rowsB, _ := store.ListTransactions(groupB, "", "", "", 0)
+	if len(rowsB) != 1 || rowsB[0].Description != "B-only" {
+		t.Errorf("group B: got %+v", rowsB)
+	}
+}
+
 func seedExpenseFixture(t *testing.T, store *TxStore) {
 	t.Helper()
-	_, _, err := store.UpsertBatch([]Transaction{
+	_, _, err := store.UpsertBatch(testGroupID, []Transaction{
 		// January: groceries + restaurant
 		{Provider: "max", CardLast4: "1111", PostedAt: "2026-01-05", AmountILS: -200, Description: "SHUFERSAL", Category: "מזון וצריכה"},
 		{Provider: "max", CardLast4: "1111", PostedAt: "2026-01-10", AmountILS: -150, Description: "WOLT", Category: "מסעדות, קפה וברים"},
@@ -134,7 +182,7 @@ func TestSumByCategory(t *testing.T) {
 	store := newTestTxStore(t)
 	seedExpenseFixture(t, store)
 
-	rows, err := store.SumBy("category", TxFilter{Since: "2026-01-01", Until: "2026-01-31"})
+	rows, err := store.SumBy(testGroupID, "category", TxFilter{Since: "2026-01-01", Until: "2026-01-31"})
 	if err != nil {
 		t.Fatalf("SumBy: %v", err)
 	}
@@ -159,7 +207,7 @@ func TestSumByCategory(t *testing.T) {
 // not 1054. charges_ils and refunds_ils stay available for transparency.
 func TestSumByNetsRefunds(t *testing.T) {
 	store := newTestTxStore(t)
-	_, _, err := store.UpsertBatch([]Transaction{
+	_, _, err := store.UpsertBatch(testGroupID, []Transaction{
 		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-03-01", AmountILS: -1054, Description: "RETAILER_X"},
 		{Provider: "cal", CardLast4: "1234", PostedAt: "2026-03-10", AmountILS: 1054, Description: "RETAILER_X"},
 		// A separate groceries transaction so we can check ordering.
@@ -169,7 +217,7 @@ func TestSumByNetsRefunds(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	rows, err := store.SumBy("merchant", TxFilter{})
+	rows, err := store.SumBy(testGroupID, "merchant", TxFilter{})
 	if err != nil {
 		t.Fatalf("SumBy: %v", err)
 	}
@@ -216,7 +264,7 @@ func TestSumByMonth(t *testing.T) {
 	store := newTestTxStore(t)
 	seedExpenseFixture(t, store)
 
-	rows, err := store.SumBy("month", TxFilter{})
+	rows, err := store.SumBy(testGroupID, "month", TxFilter{})
 	if err != nil {
 		t.Fatalf("SumBy month: %v", err)
 	}
@@ -239,7 +287,7 @@ func TestSumByMerchant(t *testing.T) {
 	store := newTestTxStore(t)
 	seedExpenseFixture(t, store)
 
-	rows, err := store.SumBy("merchant", TxFilter{Provider: "max"})
+	rows, err := store.SumBy(testGroupID, "merchant", TxFilter{Provider: "max"})
 	if err != nil {
 		t.Fatalf("SumBy merchant: %v", err)
 	}
@@ -273,7 +321,7 @@ func TestSumByFilterMerchantContains(t *testing.T) {
 	store := newTestTxStore(t)
 	seedExpenseFixture(t, store)
 
-	rows, err := store.SumBy("month", TxFilter{MerchantContains: "shufersal"}) // lowercase — should still match
+	rows, err := store.SumBy(testGroupID, "month", TxFilter{MerchantContains: "shufersal"}) // lowercase — should still match
 	if err != nil {
 		t.Fatalf("SumBy: %v", err)
 	}
@@ -285,7 +333,7 @@ func TestSumByFilterMerchantContains(t *testing.T) {
 
 func TestSumByInvalidGroupBy(t *testing.T) {
 	store := newTestTxStore(t)
-	_, err := store.SumBy("bogus", TxFilter{})
+	_, err := store.SumBy(testGroupID, "bogus", TxFilter{})
 	if err == nil {
 		t.Error("expected error for invalid groupBy")
 	}
@@ -296,7 +344,7 @@ func TestQueryTransactionsFilters(t *testing.T) {
 	seedExpenseFixture(t, store)
 
 	// Debits only, January, MAX.
-	rows, err := store.QueryTransactions(TxFilter{
+	rows, err := store.QueryTransactions(testGroupID, TxFilter{
 		Since:      "2026-01-01",
 		Until:      "2026-01-31",
 		Provider:   "max",
@@ -310,7 +358,7 @@ func TestQueryTransactionsFilters(t *testing.T) {
 	}
 
 	// Shufersal only.
-	rows, err = store.QueryTransactions(TxFilter{MerchantContains: "SHUFERSAL"})
+	rows, err = store.QueryTransactions(testGroupID, TxFilter{MerchantContains: "SHUFERSAL"})
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}

@@ -21,6 +21,7 @@ type Migration struct {
 var migrations = []Migration{
 	{ID: 1, Name: "groups", Up: migrate001Groups},
 	{ID: 2, Name: "backfill_tenant_zero", Up: migrate002BackfillTenantZero},
+	{ID: 3, Name: "metadata_composite_pk", Up: migrate003MetadataCompositePK},
 }
 
 func firstLine(s string) string {

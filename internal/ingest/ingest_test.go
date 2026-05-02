@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,17 +10,39 @@ import (
 	"testing"
 
 	"github.com/lizozom/whatsapp-nagger/internal/db"
+	_ "modernc.org/sqlite"
 )
+
+const testGroupID = "120363999999@g.us"
 
 func newTestHandler(t *testing.T, secret string) (*Handler, *db.TxStore) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "tx.db")
+
+	// migrate_001 ALTERs all three scoped tables, so they must exist first.
+	taskStore, err := db.NewTaskStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewTaskStore: %v", err)
+	}
+	taskStore.Close()
+
 	store, err := db.NewTxStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewTxStore: %v", err)
 	}
+
+	migDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open migration db: %v", err)
+	}
+	t.Setenv("WHATSAPP_GROUP_JID", "")
+	if err := db.RunMigrations(migDB); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	migDB.Close()
+
 	t.Cleanup(func() { store.Close() })
-	return NewHandler(store, secret), store
+	return NewHandler(store, secret, testGroupID), store
 }
 
 func postSigned(t *testing.T, h *Handler, secret string, body any) *httptest.ResponseRecorder {
@@ -75,7 +98,7 @@ func TestIngestHandlerHappyPath(t *testing.T) {
 	}
 
 	// Verify rows landed with provider stamped from envelope.
-	txs, err := store.ListTransactions("cal", "", "", 0)
+	txs, err := store.ListTransactions(testGroupID, "cal", "", "", 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

@@ -191,15 +191,20 @@ type Agent struct {
 	store    *db.TaskStore
 	txStore  *db.TxStore     // optional: enables expense tools when non-nil
 	linker   DashboardLinker // optional: enables dashboard_link tool when non-nil
+	groupID  string          // tenant-zero JID until Epic 2's dispatcher injects per-message group_id
 	history  []anthropic.MessageParam
 	tools    []anthropic.ToolUnionParam
 }
 
-// NewAgent constructs an agent with task and (optional) transaction stores.
+// NewAgent constructs an agent with task and (optional) transaction stores
+// scoped to groupID. In v1 this is the tenant-zero JID, cached at startup
+// from WHATSAPP_GROUP_JID. Epic 2's dispatcher will replace this with a
+// per-message group_id derived from the inbound envelope.
+//
 // If txStore is nil, the expense tools are still registered but return an
 // "expenses not configured" error — this lets the system prompt stay constant
 // regardless of deployment configuration.
-func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
+func NewAgent(store *db.TaskStore, txStore *db.TxStore, groupID string) *Agent {
 	client := anthropic.NewClient()
 
 	tools := []anthropic.ToolUnionParam{
@@ -333,6 +338,7 @@ func NewAgent(store *db.TaskStore, txStore *db.TxStore) *Agent {
 		client:  client,
 		store:   store,
 		txStore: txStore,
+		groupID: groupID,
 		tools:   tools,
 	}
 }
@@ -424,7 +430,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
-		task, err := a.store.AddTask(input.Content, input.Assignee, input.DueDate)
+		task, err := a.store.AddTask(a.groupID, input.Content, input.Assignee, input.DueDate)
 		if err != nil {
 			return "", err
 		}
@@ -439,7 +445,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
-		tasks, err := a.store.ListTasks(input.Assignee, input.Status)
+		tasks, err := a.store.ListTasks(a.groupID, input.Assignee, input.Status)
 		if err != nil {
 			return "", err
 		}
@@ -455,7 +461,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
-		task, err := a.store.UpdateTask(input.ID, input.Status, input.DueDate)
+		task, err := a.store.UpdateTask(a.groupID, input.ID, input.Status, input.DueDate)
 		if err != nil {
 			return "", err
 		}
@@ -469,7 +475,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 		if err := json.Unmarshal(inputJSON, &input); err != nil {
 			return "", fmt.Errorf("parse input: %w", err)
 		}
-		if err := a.store.DeleteTask(input.ID); err != nil {
+		if err := a.store.DeleteTask(a.groupID, input.ID); err != nil {
 			return "", err
 		}
 		return `{"deleted": true}`, nil
@@ -534,7 +540,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 				}
 				f.Cards = cards
 				f.Limit = 0
-				total, err := a.txStore.TotalSpent(f)
+				total, err := a.txStore.TotalSpent(a.groupID, f)
 				if err != nil {
 					return "", err
 				}
@@ -547,7 +553,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			}
 		} else {
 			var err error
-			rows, err = a.txStore.SumBy(input.GroupBy, baseFilter)
+			rows, err = a.txStore.SumBy(a.groupID, input.GroupBy, baseFilter)
 			if err != nil {
 				return "", err
 			}
@@ -555,7 +561,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 
 		// Always include the overall total so the LLM doesn't need to sum rows
 		// (which may be truncated by the limit).
-		total, _ := a.txStore.TotalSpent(db.TxFilter{
+		total, _ := a.txStore.TotalSpent(a.groupID, db.TxFilter{
 			Since:    since,
 			Until:    until,
 			Provider: input.Provider,
@@ -613,7 +619,7 @@ func (a *Agent) ExecuteTool(name string, inputJSON []byte) (string, error) {
 			}
 			filterCards = cards
 		}
-		txs, err := a.txStore.QueryTransactions(db.TxFilter{
+		txs, err := a.txStore.QueryTransactions(a.groupID, db.TxFilter{
 			Since:            since,
 			Until:            until,
 			Provider:         input.Provider,
