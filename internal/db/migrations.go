@@ -20,6 +20,7 @@ type Migration struct {
 // Each migrate_NNN_description function lives in its own file.
 var migrations = []Migration{
 	{ID: 1, Name: "groups", Up: migrate001Groups},
+	{ID: 2, Name: "backfill_tenant_zero", Up: migrate002BackfillTenantZero},
 }
 
 func firstLine(s string) string {
