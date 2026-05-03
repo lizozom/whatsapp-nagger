@@ -61,7 +61,9 @@ func buildOnboardingSystemPrompt(group *db.Group, members []db.Member) string {
 	b.WriteString("# Tone & language\n")
 	switch group.Language {
 	case "he":
-		b.WriteString("Reply ONLY in Hebrew from now on. Warm, friendly, brief.\n")
+		b.WriteString("Reply ONLY in Hebrew from now on. Use natural conversational Israeli Hebrew (עברית מדוברת) — warm, friendly, brief. ")
+		b.WriteString("Avoid clunky slash forms ('פתח/י'); pick one form by context or rephrase to plural/impersonal. ")
+		b.WriteString("No English words mixed in.\n")
 	case "en":
 		b.WriteString("Reply ONLY in English from now on. Warm, friendly, brief.\n")
 	default:

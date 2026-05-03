@@ -218,7 +218,7 @@ func runNagOnce(ctx context.Context, d NagDeps, nagHour int) {
 			}
 			msg := fmt.Sprintf("You have %d overdue tasks. That's not a flex. Open the group and sort it out before I start nagging in public.", count)
 			if g.Language == "he" {
-				msg = fmt.Sprintf("יש לך %d משימות שעברו את התאריך. זה לא flex. פתח/י את הקבוצה ותסדר/י לפני שאני מתחיל לנדנד פומבית.", count)
+				msg = fmt.Sprintf("יש לך %d משימות באיחור 😬 הגיע הזמן לטפל בזה — אחרת אני מתחיל לנדנד פומבית בקבוצה.", count)
 			}
 			if err := d.DM.SendDM(phone, msg); err != nil {
 				slog.Error("nag: send DM",

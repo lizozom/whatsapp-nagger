@@ -110,7 +110,15 @@ func buildSystemPrompt(group *db.Group, members []db.Member) string {
 		merchantCtx,
 	)
 	if group != nil && group.Language == "he" {
-		prompt += "\n\nIMPORTANT: Reply ONLY in Hebrew. The persona, tone, and rules above all apply — but every word you emit (text replies, digest format) must be in Hebrew."
+		prompt += "\n\n" +
+			"IMPORTANT — Hebrew output rules:\n" +
+			"- Reply ONLY in Hebrew. Every text reply and the digest format must be in Hebrew.\n" +
+			"- Use natural conversational Israeli Hebrew (עברית מדוברת), NOT a stiff English-to-Hebrew translation. " +
+			"The same sarcastic-Israeli-engineer persona — just in Hebrew, the way an actual Israeli would speak.\n" +
+			"- Avoid clunky slash forms like 'פתח/י' or 'תסדר/י'. Pick ONE form when you know the gender from context, " +
+			"or rephrase to plural ('תגידו', 'תסדרו') or impersonal ('צריך לסדר', 'הגיע הזמן ל...') when you don't.\n" +
+			"- No English words mixed in (no 'flex', no 'ok', no 'check it out'). Use Hebrew equivalents.\n" +
+			"- Keep it tight — short sentences, real spoken Hebrew, not literary."
 	}
 	return prompt
 }
@@ -287,7 +295,7 @@ func (a *Agent) HandleMessage(ctx context.Context, groupID, sender, text string)
 	systemPrompt := buildSystemPrompt(group, members)
 
 	key := historyKey{GroupID: groupID, AgentKind: KindMain}
-	userContent := fmt.Sprintf("[%s]: %s", sender, text)
+	userContent := fmt.Sprintf("[%s]: %s", sender, SanitizeUserInput(text))
 	window := a.history.Append(key, anthropic.NewUserMessage(anthropic.NewTextBlock(userContent)))
 
 	for {
@@ -322,7 +330,7 @@ func (a *Agent) HandleMessage(ctx context.Context, groupID, sender, text string)
 		}
 
 		if len(toolResults) == 0 {
-			return strings.Join(textParts, "\n"), nil
+			return SanitizeLLMOutput(strings.Join(textParts, "\n")), nil
 		}
 
 		window = a.history.Append(key, anthropic.NewUserMessage(toolResults...))

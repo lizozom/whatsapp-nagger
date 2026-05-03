@@ -55,7 +55,7 @@ func (o *OnboardingAgent) Handle(ctx context.Context, groupID, sender, text stri
 	}
 
 	key := historyKey{GroupID: groupID, AgentKind: KindOnboarding}
-	userContent := fmt.Sprintf("[%s]: %s", sender, text)
+	userContent := fmt.Sprintf("[%s]: %s", sender, SanitizeUserInput(text))
 	window := o.history.Append(key, anthropic.NewUserMessage(anthropic.NewTextBlock(userContent)))
 
 	tools := buildOnboardingTools()
@@ -97,7 +97,7 @@ func (o *OnboardingAgent) Handle(ctx context.Context, groupID, sender, text stri
 		}
 
 		if len(toolResults) == 0 {
-			response := strings.Join(textParts, "\n")
+			response := SanitizeLLMOutput(strings.Join(textParts, "\n"))
 			if response == "" {
 				return nil
 			}
@@ -110,7 +110,7 @@ func (o *OnboardingAgent) Handle(ctx context.Context, groupID, sender, text stri
 		// assistant message. Send the assistant's pre-tool text (if any)
 		// plus a hardcoded confirmation in the locked language and return.
 		if completed {
-			msg := strings.TrimSpace(strings.Join(textParts, "\n"))
+			msg := SanitizeLLMOutput(strings.Join(textParts, "\n"))
 			closing := completionMessage(group.Language)
 			if msg != "" {
 				msg += "\n\n" + closing
@@ -130,7 +130,7 @@ func (o *OnboardingAgent) Handle(ctx context.Context, groupID, sender, text stri
 func completionMessage(language string) string {
 	switch language {
 	case "he":
-		return "הכל מוכן! 🎉 מעכשיו אני בקבוצה הראשית. תגידו לי על משימות והוצאות — אזכיר אתכם כל בוקר."
+		return "מוכן לעבודה 🎉 שלחו לי משימות, וכל בוקר אזכיר את מה שתקוע."
 	default:
 		return "All set! 🎉 I'm now in main mode. Send me tasks anytime — I'll remind you every morning."
 	}
