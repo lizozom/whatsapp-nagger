@@ -74,11 +74,22 @@ export async function scrapeCal(
   }
 
   const normalized: NormalizedTransaction[] = [];
+  let skippedPending = 0;
   for (const account of kept) {
     const cardLast4 = lastFour(account.accountNumber);
     for (const tx of account.txns) {
+      // Skip pending: Cal rewrites the description on settlement (e.g. strips
+      // "<City> <CountryCode>" off foreign charges), which changes the dedup
+      // hash and produces a duplicate row when the charge later posts.
+      if (tx.status === TransactionStatuses.Pending) {
+        skippedPending++;
+        continue;
+      }
       normalized.push(normalizeTx("cal", cardLast4, tx));
     }
+  }
+  if (skippedPending > 0) {
+    console.error(`[cal] skipped ${skippedPending} pending tx (will ingest once posted)`);
   }
 
   return { transactions: normalized };
@@ -99,8 +110,6 @@ function normalizeTx(
   // negative for debits, positive for credits. That matches our Go schema.
   const amountILS = Number(tx.chargedAmount);
   const postedAt = isoDate(tx.date);
-  const status: "pending" | "posted" =
-    tx.status === TransactionStatuses.Pending ? "pending" : "posted";
 
   return {
     card_last4: cardLast4,
@@ -109,7 +118,7 @@ function normalizeTx(
     description: (tx.description ?? "").trim(),
     memo: (tx.memo ?? "").trim() || undefined,
     category: tx.category,
-    status,
+    status: "posted",
   };
 }
 

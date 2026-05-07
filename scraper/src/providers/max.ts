@@ -70,11 +70,21 @@ export async function scrapeMax(
   }
 
   const normalized: NormalizedTransaction[] = [];
+  let skippedPending = 0;
   for (const account of kept) {
     const cardLast4 = lastFour(account.accountNumber);
     for (const tx of account.txns) {
+      // Skip pending: description/amount can change on settlement, which
+      // changes the dedup hash and produces duplicate rows.
+      if (tx.status === TransactionStatuses.Pending) {
+        skippedPending++;
+        continue;
+      }
       normalized.push(normalizeTx(cardLast4, tx));
     }
+  }
+  if (skippedPending > 0) {
+    console.error(`[max] skipped ${skippedPending} pending tx (will ingest once posted)`);
   }
 
   return { transactions: normalized };
@@ -89,8 +99,6 @@ function lastFour(accountNumber: string | undefined): string {
 function normalizeTx(cardLast4: string, tx: LibTransaction): NormalizedTransaction {
   const amountILS = Number(tx.chargedAmount);
   const postedAt = isoDate(tx.date);
-  const status: "pending" | "posted" =
-    tx.status === TransactionStatuses.Pending ? "pending" : "posted";
 
   return {
     card_last4: cardLast4,
@@ -99,7 +107,7 @@ function normalizeTx(cardLast4: string, tx: LibTransaction): NormalizedTransacti
     description: (tx.description ?? "").trim(),
     memo: (tx.memo ?? "").trim() || undefined,
     category: tx.category,
-    status,
+    status: "posted",
   };
 }
 
